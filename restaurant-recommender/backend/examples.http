@@ -1,0 +1,19 @@
+### Health
+GET http://localhost:8010/healthz
+
+### Recommend (Chinese)
+POST http://localhost:8010/recommend
+Content-Type: application/json
+
+{
+  "query": "周五晚在上海徐汇 3 人，人均150，川菜，安静，有无包间都行"
+}
+
+### Recommend (English)
+POST http://localhost:8010/recommend
+Content-Type: application/json
+
+{
+  "query": "Dinner in Shanghai Xuhui, 3 people, around 150 CNY per person, Sichuan cuisine, quiet environment"
+}
+

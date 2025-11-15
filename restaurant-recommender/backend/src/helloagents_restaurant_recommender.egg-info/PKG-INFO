@@ -1,0 +1,47 @@
+Metadata-Version: 2.4
+Name: helloagents-restaurant-recommender
+Version: 0.1.0
+Summary: Geoapify-powered restaurant recommendation MVP using HelloAgents patterns.
+Author: Hello-Agents Team
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: fastapi>=0.115.0
+Requires-Dist: hello-agents>=0.2.8
+Requires-Dist: huggingface_hub>=0.23.0
+Requires-Dist: ddgs>=9.6.1
+Requires-Dist: python-dotenv==1.0.1
+Requires-Dist: requests>=2.31.0
+Requires-Dist: pydantic>=2.8.0
+Requires-Dist: uvicorn[standard]>=0.32.0
+Requires-Dist: loguru>=0.7.3
+Provides-Extra: dev
+Requires-Dist: mypy>=1.11.1; extra == "dev"
+Requires-Dist: ruff>=0.6.1; extra == "dev"
+Requires-Dist: pytest>=8.2.0; extra == "dev"
+
+# Restaurant Recommender (MVP)
+
+Geoapify‑powered restaurant recommendation service using HelloAgents patterns.
+
+- Endpoints: `GET /healthz`, `GET /health/geo`, `GET /health/llm`, `POST /recommend`, and static `/` test page
+- Flow: parse preferences (LLM with rules fallback) → geocode → bbox → Geoapify rect → dedupe → rank → Markdown report
+
+## Run (macOS one‑shot)
+
+```
+bash scripts/start_all_mac.sh
+```
+
+This script:
+- Loads `.env` (Geoapify key)
+- Ensures Homebrew + Ollama, starts ollama, pulls `llama3.2`
+- Creates venv, installs deps, starts FastAPI on `http://localhost:8010/`
+- Opens the browser with the built‑in test page
+
+If `pip install -e .` fails (no packaging), it will fallback to `pip install -r requirements.txt`.
+
+## Env
+- `GEOAPIFY_API_KEY` (required)
+- Optional LLM: `LLM_PROVIDER=ollama`, `LOCAL_LLM=llama3.2`, `OLLAMA_BASE_URL=http://localhost:11434`
+

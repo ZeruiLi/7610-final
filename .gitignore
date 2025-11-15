@@ -1,0 +1,31 @@
+# Ignore original tutorial repo
+hello-agents/
+
+# macOS artifacts
+.DS_Store
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.env
+.venv/
+venv/
+
+# Node artifacts
+node_modules/
+dist/
+
+# Project specific (restaurant-recommender)
+restaurant-recommender/.logs/
+restaurant-recommender/.pids/
+restaurant-recommender/backend/.venv/
+restaurant-recommender/backend/.pytest_cache/
+restaurant-recommender/backend/.env
+restaurant-recommender/frontend/node_modules/
+restaurant-recommender/frontend/dist/
+restaurant-recommender/frontend/*.local

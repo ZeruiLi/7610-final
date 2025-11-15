@@ -1,0 +1,14 @@
+fastapi>=0.115.0
+hello-agents>=0.2.8
+huggingface_hub>=0.23.0
+ddgs>=9.6.1
+python-dotenv==1.0.1
+requests>=2.31.0
+pydantic>=2.8.0
+uvicorn[standard]>=0.32.0
+loguru>=0.7.3
+
+[dev]
+mypy>=1.11.1
+ruff>=0.6.1
+pytest>=8.2.0
