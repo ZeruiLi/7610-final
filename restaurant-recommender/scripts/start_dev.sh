@@ -16,7 +16,7 @@ kill_port() {
     pids=$(lsof -ti:"$port" || true)
     if [[ -n "$pids" ]]; then
       echo "[start-dev] Killing processes on port $port ($pids)"
-      kill $pids || true
+      kill -9 $pids || true
     fi
   fi
 }
@@ -28,17 +28,15 @@ start_backend() {
   local venv_dir="$BACKEND_DIR/.venv"
   if [[ ! -d "$venv_dir" ]]; then
     echo "[start-dev] Creating python venv at $venv_dir"
-    if command -v python3.11 >/dev/null 2>&1; then
-      python3.11 -m venv "$venv_dir"
-    else
-      python3 -m venv "$venv_dir"
-    fi
+    python3 -m venv "$venv_dir"
   fi
 
   source "$venv_dir/bin/activate"
-  # keep deps fresh (cached installs are fast)
-  python -m pip install --upgrade pip >/dev/null
-  python -m pip install -r "$BACKEND_DIR/requirements.txt" >/dev/null
+  
+  echo "[start-dev] Installing/Updating backend dependencies..."
+  python -m pip install --upgrade pip
+  python -m pip install -r "$BACKEND_DIR/requirements.txt"
+
   if [[ -f "$BACKEND_DIR/.env" ]]; then
     set -a
     source "$BACKEND_DIR/.env"
@@ -46,7 +44,7 @@ start_backend() {
   fi
 
   pushd "$BACKEND_DIR/src" >/dev/null
-  PYTHONPATH=. nohup python -m uvicorn main:app --port 8010 --log-level warning \
+  PYTHONPATH=. nohup python -m uvicorn main:app --port 8010 --log-level info \
     >"$LOG_DIR/backend.log" 2>&1 &
   local pid=$!
   popd >/dev/null
@@ -60,11 +58,13 @@ start_backend() {
   for i in {1..30}; do
     if curl -sf "http://localhost:8010/healthz" >/dev/null 2>&1; then
       echo " - OK"
-      break
+      return 0
     fi
     echo -n "."
     sleep 1
   done
+  echo " - Failed to start backend. Check logs at $LOG_DIR/backend.log"
+  return 1
 }
 
 start_frontend() {
@@ -72,20 +72,10 @@ start_frontend() {
   kill_port 5173
 
   pushd "$FRONTEND_DIR" >/dev/null
-  local node_prefix=""
-  if [[ -x /opt/homebrew/opt/node@20/bin/node ]]; then
-    node_prefix="/opt/homebrew/opt/node@20/bin"
-  elif [[ -x /opt/homebrew/bin/node ]]; then
-    node_prefix="/opt/homebrew/bin"
-  fi
-
-  if [[ -n "$node_prefix" ]]; then
-    export PATH="$node_prefix:$PATH"
-  fi
-
+  
   if [[ ! -d node_modules ]]; then
     echo "[start-dev] Installing frontend dependencies"
-    npm install >/dev/null
+    npm install
   fi
 
   nohup npm run dev -- --host 0.0.0.0 --port 5173 \
@@ -104,6 +94,5 @@ echo "[start-dev] Services ready:"
 echo "  - Backend: http://localhost:8010/"
 echo "  - Frontend: http://localhost:5173/"
 echo "[start-dev] To stop:"
-echo "  kill \
-    \$(cat '$PID_DIR/backend.pid') \
-    \$(cat '$PID_DIR/frontend.pid')"
+echo "  kill \$(cat '$PID_DIR/backend.pid') \$(cat '$PID_DIR/frontend.pid')"
+

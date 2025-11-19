@@ -466,7 +466,7 @@ def search_candidates(cfg: Configuration, spec: PreferenceSpec) -> tuple[List[Pl
                         final_bbox[2],
                         final_bbox[3],
                         categories=categories,
-                        limit=cfg.geoapify_max_results,
+                        limit=50,  # Increased from default to support top-24 recommendations
                         lang=lang,
                     )
                 except GeoapifyError:

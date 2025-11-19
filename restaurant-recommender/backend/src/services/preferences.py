@@ -80,8 +80,13 @@ class PreferencesParser:
             kwargs["api_key"] = cfg.llm_api_key
         return HelloAgentsLLM(**kwargs)
 
-    def parse(self, text: str) -> PreferenceSpec:
-        raw = self.agent.run(text)
+    def parse(self, text: str, history: list[dict] | None = None) -> PreferenceSpec:
+        prompt = text
+        if history:
+            hist_str = "\n".join([f"{t['role']}: {t['content']}" for t in history])
+            prompt = f"HISTORY:\n{hist_str}\n\nCURRENT REQUEST: {text}"
+        
+        raw = self.agent.run(prompt)
         self.agent.clear_history()
         cleaned = strip_thinking_tokens(raw).strip()
         # locate JSON braces if extra text remains
@@ -378,24 +383,33 @@ def parse_with_rules(cfg: Configuration, text: str) -> PreferenceSpec:
     return _to_spec(cfg, data)
 
 
-def parse_preferences(cfg: Configuration, text: str) -> PreferenceSpec:
+def parse_preferences(cfg: Configuration, text: str, history: list[dict] | None = None) -> PreferenceSpec:
     """Parse preferences using LLM when configured, otherwise fall back to rules."""
     llm_available = bool(cfg.llm_provider or cfg.llm_base_url or cfg.local_llm)
     if not llm_available:
-        spec = parse_with_rules(cfg, text)
+        combined_text = text
+        if history:
+            combined_text = " ".join([str(t.get("content", "")) for t in history]) + " " + text
+        spec = parse_with_rules(cfg, combined_text)
         return _post_process_preferences(text, spec)
+
+    # fallback logic
+    combined_text = text
+    if history:
+        # Simple concatenation to allow rule-based parser to see previous context (e.g. city)
+        combined_text = " ".join([str(t.get("content", "")) for t in history]) + " " + text
 
     try:
         parser = PreferencesParser(cfg)
-        spec = parser.parse(text)
+        spec = parser.parse(text, history)
         if not spec.city:
-            # attempt rules fallback if city missing
-            spec = parse_with_rules(cfg, text)
+            # attempt rules fallback if city missing, using combined text
+            spec = parse_with_rules(cfg, combined_text)
         return _post_process_preferences(text, spec)
     except Exception:
         # fallback on any LLM failure
-        spec = parse_with_rules(cfg, text)
-        return _post_process_preferences(text, spec)
+        spec = parse_with_rules(cfg, combined_text)
+    return _post_process_preferences(text, spec)
 
 
 def _post_process_preferences(text: str, spec: PreferenceSpec) -> PreferenceSpec:
@@ -405,6 +419,14 @@ def _post_process_preferences(text: str, spec: PreferenceSpec) -> PreferenceSpec
             spec.must_include_cuisines.append("Pizza")
         if "Pizza" not in spec.cuisines:
             spec.cuisines.append("Pizza")
+
+    # Add spicy/hot keyword detection
+    text_lower = text.lower()
+    spicy_keywords = ["spicy", "hot", "mala", "sichuan", "hunan", "chongqing"]
+    if any(kw in text_lower for kw in spicy_keywords):
+        # Only add to cuisines for ranking boost, NOT to must_include (which forces filtering)
+        if "spicy" not in [c.lower() for c in spec.cuisines]:
+            spec.cuisines.append("Spicy")
 
     anchor_poi, anchor_zip = _extract_location_signals(text)
     if anchor_poi and not spec.anchor_poi:

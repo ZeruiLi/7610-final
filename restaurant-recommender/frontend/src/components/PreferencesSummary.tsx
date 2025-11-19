@@ -1,3 +1,5 @@
+import React from 'react'
+
 type Preferences = Record<string, unknown>
 
 interface PreferencesSummaryProps {
@@ -6,73 +8,62 @@ interface PreferencesSummaryProps {
   latency?: number
 }
 
-function formatValue(value: unknown): string {
+function formatValue(value: unknown): string | null {
   if (Array.isArray(value)) {
-    return value.filter(Boolean).join(', ') || 'Not specified'
+    const filtered = value.filter(Boolean)
+    return filtered.length > 0 ? filtered.join(', ') : null
   }
   if (value === null || value === undefined || value === '') {
-    return 'Not specified'
+    return null
   }
   if (typeof value === 'number') {
-    return Number.isFinite(value) ? value.toString() : 'Not specified'
+    return Number.isFinite(value) ? value.toString() : null
   }
   return String(value)
 }
 
-export function PreferencesSummary({ preferences, bbox, latency }: PreferencesSummaryProps) {
-  const fields: Array<{ key: string; label: string }> = [
-    { key: 'city', label: 'City' },
-    { key: 'area', label: 'Area' },
-    { key: 'people', label: 'Party size' },
-    { key: 'budget_per_capita', label: 'Budget per guest' },
-    { key: 'cuisines', label: 'Cuisines' },
-    { key: 'ambiance', label: 'Ambience' },
-    { key: 'distance_km', label: 'Radius (km)' },
-    { key: 'lang', label: 'Language' },
-  ]
+export function PreferencesSummary({ preferences }: PreferencesSummaryProps) {
+  // We only show key fields that are actually set to keep it compact
+  const summaryItems: Array<{ label: string; value: string }> = []
+
+  const addIfSet = (label: string, key: string, suffix: string = '') => {
+    const val = formatValue(preferences[key])
+    if (val && val !== 'Not specified') {
+      summaryItems.push({ label, value: val + suffix })
+    }
+  }
+
+  addIfSet('📍', 'city')
+  addIfSet('📍 Area', 'area')
+  addIfSet('🍽️', 'cuisines')
+  addIfSet('🌶️', 'must_include_cuisines')  // Add spicy/required cuisines
+  addIfSet('🚫', 'must_exclude_cuisines')
+  addIfSet('💰', 'budget_per_capita', '/person')
+  addIfSet('👥', 'people', ' ppl')
+  addIfSet('✨', 'ambiance')
+
+  // Special handling for radius if it's not default (e.g. 3)
+  const radius = preferences['distance_km']
+  if (typeof radius === 'number' && radius !== 3) {
+    summaryItems.push({ label: '📏', value: `${radius}km` })
+  }
+
+  // Fallback if nothing is parsed (rare)
+  if (summaryItems.length === 0) {
+    summaryItems.push({ label: '🔍', value: 'Searching...' })
+  }
 
   return (
-    <section className="preferences-summary" aria-label="preference-summary">
-      <h2>Parsed preferences</h2>
-      <dl>
-        {fields.map(({ key, label }) => (
-          <div key={key} className="preferences-summary__item">
-            <dt>{label}</dt>
-            <dd>{formatValue(preferences[key])}</dd>
+    <div className="preferences-bar">
+      <div className="preferences-scroll">
+        {summaryItems.map((item, idx) => (
+          <div key={idx} className="preference-chip">
+            <span className="preference-chip__label">{item.label}</span>
+            <span className="preference-chip__value">{item.value}</span>
           </div>
         ))}
-        {bbox ? (
-          <div className="preferences-summary__item">
-            <dt>Bounding box</dt>
-            <dd>
-              [{bbox[0].toFixed(4)}, {bbox[1].toFixed(4)}] → [{bbox[2].toFixed(4)}, {bbox[3].toFixed(4)}]
-            </dd>
-          </div>
-        ) : null}
-        {typeof latency === 'number' ? (
-          <div className="preferences-summary__item">
-            <dt>Response time</dt>
-            <dd>{latency.toFixed(0)} ms</dd>
-          </div>
-        ) : null}
-        <div className="preferences-summary__item">
-          <dt>Must include cuisines</dt>
-          <dd>{formatValue(preferences['must_include_cuisines'])}</dd>
-        </div>
-        <div className="preferences-summary__item">
-          <dt>Must exclude cuisines</dt>
-          <dd>{formatValue(preferences['must_exclude_cuisines'])}</dd>
-        </div>
-        <div className="preferences-summary__item">
-          <dt>Dining time</dt>
-          <dd>{formatValue(preferences['dining_time'])}</dd>
-        </div>
-        <div className="preferences-summary__item">
-          <dt>Strict opening check</dt>
-          <dd>{String(preferences['strict_open_check'] ?? true)}</dd>
-        </div>
-      </dl>
-    </section>
+      </div>
+    </div>
   )
 }
 

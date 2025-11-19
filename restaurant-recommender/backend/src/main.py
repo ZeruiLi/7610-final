@@ -92,6 +92,8 @@ def _to_str_list(value: Any) -> list[str]:
 
 class RecommendRequest(BaseModel):
     query: str = Field(..., description="Natural-language dining request")
+    session_id: Optional[str] = Field(None, description="Session ID for conversation history")
+    limit: int = Field(8, description="Number of results to enrich and return details for")
 
 
 class PlacePayload(BaseModel):
@@ -191,7 +193,7 @@ def health_llm() -> dict:
 
 
 @app.post("/recommend", response_model=RecommendResponse)
-def recommend(req: RecommendRequest) -> RecommendResponse:
+async def recommend(req: RecommendRequest) -> RecommendResponse:
     try:
         cfg = Configuration.from_env()
         cfg.require_geoapify()
@@ -199,7 +201,11 @@ def recommend(req: RecommendRequest) -> RecommendResponse:
         raise HTTPException(status_code=400, detail=str(exc))
 
     try:
-        spec: PreferenceSpec = parse_preferences(cfg, req.query)
+        # Session handling
+        from services.session import session_manager
+        history = session_manager.get_history(req.session_id) if req.session_id else None
+
+        spec: PreferenceSpec = parse_preferences(cfg, req.query, history=history)
         if not spec.city:
             raise ValueError("Unable to parse a city from the request. Please include a US city or metro area.")
 
@@ -208,12 +214,17 @@ def recommend(req: RecommendRequest) -> RecommendResponse:
         ranked = rank_candidates(spec, places, bbox_center=center)
         ranked = apply_rerank(cfg, spec, ranked)
 
-        # v2: enrich top-K with details and reason
-        top_k = min(5, len(ranked))
-        for i in range(top_k):
-            c = ranked[i]
-            ctx = fetch_details(c.place, lang=spec.lang or cfg.lang_default)
-            reason = build_reason(cfg, spec, c.place, ctx)
+    # v2: enrich top-K with details and reason
+        top_k = min(req.limit, len(ranked))
+        
+        import asyncio
+        from services.details import fetch_details_async
+
+        async def process_candidate(c):
+            ctx = await fetch_details_async(c.place, lang=spec.lang or cfg.lang_default)
+            # Run reasoner in thread to avoid blocking
+            reason = await asyncio.to_thread(build_reason, cfg, spec, c.place, ctx)
+            
             c.highlights = _to_str_list(reason.get("highlights"))
             c.signature_dishes = _to_str_list(reason.get("signature_dishes"))
             c.why_matched = _to_str_list(reason.get("why_matched"))
@@ -222,7 +233,15 @@ def recommend(req: RecommendRequest) -> RecommendResponse:
             c.source_hits = ctx.hits
             c.source_trust_score = ctx.trust_score
 
+        # Run in parallel
+        await asyncio.gather(*(process_candidate(c) for c in ranked[:top_k]))
+
         md = build_report(spec, ranked, bbox)
+        
+        # Save turn
+        if req.session_id:
+            session_manager.add_turn(req.session_id, req.query, md)
+
         avg_trust = sum(c.source_trust_score for c in ranked[:top_k]) / max(top_k, 1) if top_k else 0.0
         distances = [c.distance_miles for c in ranked[:top_k] if c.distance_miles]
         median_distance = statistics.median(distances) if distances else 0.0

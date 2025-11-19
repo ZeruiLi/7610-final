@@ -146,3 +146,9 @@ def fetch_details(place: Place, lang: str = "en") -> DetailContext:
     )
     _DETAIL_CACHE[key] = (now, ctx)
     return ctx
+
+
+async def fetch_details_async(place: Place, lang: str = "en") -> DetailContext:
+    """Async wrapper for fetch_details to allow concurrent execution."""
+    import asyncio
+    return await asyncio.to_thread(fetch_details, place, lang)

@@ -51,6 +51,8 @@ export interface RecommendResponse {
 
 export interface RecommendRequestPayload {
   query: string
+  session_id?: string
+  limit?: number
 }
 
 export type RecommendConfigHeader = Record<string, unknown>

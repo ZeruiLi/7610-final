@@ -59,8 +59,8 @@ export function isRecommendResponse(value: unknown): value is RecommendResponse 
   return true
 }
 
-export async function recommend(query: string, opts?: { signal?: AbortSignal }): Promise<RecommendResponse> {
-  const payload: RecommendRequestPayload = { query }
+export async function recommend(query: string, opts?: { signal?: AbortSignal; sessionId?: string; limit?: number }): Promise<RecommendResponse> {
+  const payload: RecommendRequestPayload = { query, session_id: opts?.sessionId, limit: opts?.limit ?? 8 }
   const started = performance.now()
   let response: Response
 
