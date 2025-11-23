@@ -49,6 +49,8 @@ class PreferenceSpec:
     anchor_zip: Optional[str] = None
     anchor_type: Optional[str] = None
     anchor_label: Optional[str] = None
+    anchor_lat: Optional[float] = None
+    anchor_lon: Optional[float] = None
 
 
 @dataclass
@@ -63,17 +65,22 @@ class Candidate:
     signature_dishes: list[str] = field(default_factory=list)
     why_matched: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
-    detail_sources: list[dict] = field(default_factory=list)  # {title,url}
     match_cuisine: bool = False
     match_ambience: bool = False
     match_budget: bool = False
     match_distance: bool = False
     match_popularity: bool = False
+    match_tier: int = 1  # NEW: 1=perfect match, 2=relaxed match
     primary_tags: list[str] = field(default_factory=list)
-    reliability_score: float = 0.0
+    reliability_score: float = 0.5
     distance_km: float = 0.0
     distance_miles: float = 0.0
     source_hits: int = 0
     source_trust_score: float = 0.0
     is_open_ok: bool = True
     violated_constraints: list[str] = field(default_factory=list)
+    detail_sources: list[dict] = field(default_factory=list)  # {title,url}
+    debug_scores: dict[str, float] = field(default_factory=dict)
+    derived_rating: Optional[float] = None
+    rating_source: Optional[str] = None
+    match_mode: str = "strict"

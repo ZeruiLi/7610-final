@@ -1,4 +1,4 @@
-# Restaurant Recommender (Standalone Build)
+# TastyGo (Standalone Build)
 
 Geoapify-powered restaurant recommendation service with a FastAPI backend, React/Vite frontend, and evaluation scripts. The backend parses natural-language dining requests, searches Geoapify for candidates, ranks/reranks them, enriches the top picks with detail sources, and returns both structured cards and an explanatory Markdown report. The frontend provides a conversational interface, result cards, Markdown rendering, and preference diagnostics.
 
@@ -6,7 +6,7 @@ Geoapify-powered restaurant recommendation service with a FastAPI backend, React
 ```
 restaurant-recommender/
 ├── backend/              # FastAPI app + services
-├── frontend/             # Vite/React UI generated via Tango components
+├── frontend/             # Vite/React UI for the TastyGo experience
 ├── eval/                 # JSONL datasets + evaluation runner
 ├── scripts/              # helper scripts (dev launcher, etc.)
 ├── README.md             # this file
@@ -36,10 +36,11 @@ From the `restaurant-recommender/` directory:
 ```
 bash scripts/start_dev.sh
 ```
-This script:
-1. Creates/updates `backend/.venv`, installs Python deps, loads `backend/.env` and starts FastAPI on port 8010.
-2. Installs frontend npm deps (if needed) and runs `npm run dev` on port 5173.
-3. Logs go to `.logs/`, process ids to `.pids/`.
+This script now serves as a one-click **restart**:
+1. Stops any previously running backend/frontend instances (kills stored PIDs and frees ports 8010/5173).
+2. Creates/updates `backend/.venv`, installs Python deps, loads `backend/.env` and starts FastAPI on port 8010.
+3. Installs frontend npm deps (if needed) and runs `npm run dev` on port 5173.
+4. Logs go to `.logs/`, process ids to `.pids/`.
 
 Stop both services with:
 ```

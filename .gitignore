@@ -29,3 +29,6 @@ restaurant-recommender/backend/.env
 restaurant-recommender/frontend/node_modules/
 restaurant-recommender/frontend/dist/
 restaurant-recommender/frontend/*.local
+
+# Dev planning docs
+DEV_PLAN.md

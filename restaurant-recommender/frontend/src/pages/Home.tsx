@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { recommend, ApiError } from '../api/recommend'
-import type { RecommendResponse, CandidatePayload } from '../types'
+import { recommendStream, ApiError, type StreamedResult } from '../api/recommend'
+import type { CandidatePayload } from '../types'
 import { SearchBar } from '../components/SearchBar'
 import { ResultCard } from '../components/ResultCard'
 import { ErrorBar } from '../components/ErrorBar'
@@ -12,13 +12,19 @@ const DEFAULT_QUERY = 'Dinner in Seattle Capitol Hill for 2, vegetarian-friendly
 
 export function HomePage() {
   const [query, setQuery] = useState('')
-  const [data, setData] = useState<RecommendResponse | null>(null)
+  const [streamedResults, setStreamedResults] = useState<StreamedResult[]>([])
+  const [preferences, setPreferences] = useState<Record<string, unknown> | null>(null)
+  const [bbox, setBbox] = useState<[number, number, number, number] | null>(null)
   const [pending, setPending] = useState(false)
+  const [streamComplete, setStreamComplete] = useState(false)
   const [error, setError] = useState<ApiError | null>(null)
   const [sessionId, setSessionId] = useState<string>('')
   const [latency, setLatency] = useState<number | null>(null)
   const [selectedCandidate, setSelectedCandidate] = useState<CandidatePayload | null>(null)
   const [visibleCount, setVisibleCount] = useState(8)
+  const [userLocation, setUserLocation] = useState<{ lat: number; lon: number } | null>(null)
+  const [locationHint, setLocationHint] = useState<string>('')
+  const [lastQuery, setLastQuery] = useState<string>('')
 
   const controllerRef = useRef<AbortController | null>(null)
   const resultsContainerRef = useRef<HTMLDivElement>(null)
@@ -36,6 +42,10 @@ export function HomePage() {
       setPending(true)
       setError(null)
       setLatency(null)
+      setLastQuery(trimmed)
+      setStreamedResults([])
+      setStreamComplete(false)
+      setVisibleCount(8)
 
       controllerRef.current?.abort()
       const controller = new AbortController()
@@ -44,14 +54,23 @@ export function HomePage() {
       const started = performance.now()
 
       try {
-        const result = await recommend(trimmed, {
+        // Use streaming API
+        for await (const result of recommendStream(trimmed, {
           signal: controller.signal,
           sessionId: sessionId,
-          limit: 24 // Fetch more to allow "Load More"
-        })
+          limit: 24,
+          userLocation: userLocation ?? undefined,
+        })) {
+          setStreamedResults(prev => [...prev, result])
+
+          // Add small delay for initial batch visual effect
+          if (result.is_initial_batch && result.index < 7) {
+            await new Promise(resolve => setTimeout(resolve, 100))
+          }
+        }
+
         setLatency(performance.now() - started)
-        setData(result)
-        setVisibleCount(8) // Reset visible count on new search
+        setStreamComplete(true)
         setQuery('') // Clear input after successful submission
 
         // Scroll to top of results
@@ -74,34 +93,58 @@ export function HomePage() {
         setPending(false)
       }
     },
-    [sessionId],
+    [sessionId, userLocation],
   )
 
   const handleClear = useCallback(() => {
     controllerRef.current?.abort()
     controllerRef.current = null
     setQuery('')
-    setData(null)
+    setStreamedResults([])
+    setPreferences(null)
+    setBbox(null)
+    setStreamComplete(false)
     setError(null)
+    setLastQuery('')
     // Reset session on clear to start fresh context
     setSessionId(`sess-${Date.now()}-${Math.random().toString(36).slice(2)}`)
   }, [])
 
-  const hasResults = (data?.candidates.length ?? 0) > 0
+  const handleUseLocation = useCallback(() => {
+    if (!navigator.geolocation) {
+      setLocationHint('Geolocation not supported in this browser.')
+      return
+    }
+    setLocationHint('Requesting location...')
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setUserLocation({ lat: pos.coords.latitude, lon: pos.coords.longitude })
+        setLocationHint(`Using current location (${pos.coords.latitude.toFixed(4)}, ${pos.coords.longitude.toFixed(4)})`)
+      },
+      (err) => {
+        console.error('geolocation error', err)
+        setLocationHint('Unable to get location. Please allow permission or try again.')
+      },
+      { enableHighAccuracy: false, timeout: 8000 },
+    )
+  }, [])
+
+  const hasResults = streamedResults.length > 0
+  const visibleCandidates = streamedResults.slice(0, visibleCount).map(r => r.candidate)
 
   return (
     <section className="home-page">
       {/* Sticky Preferences - OUTSIDE scroll container */}
-      {data && (
+      {(preferences || bbox) && (
         <div className="preferences-bar-container">
-          <PreferencesSummary preferences={data.preferences} bbox={data.bbox} latency={latency ?? undefined} />
+          <PreferencesSummary preferences={preferences || {}} bbox={bbox || [0, 0, 0, 0]} latency={latency ?? undefined} />
         </div>
       )}
 
       {/* Main Scrollable Content Area */}
       <div className="dashboard-content" ref={resultsContainerRef}>
         {/* State A: Empty / Welcome */}
-        {!data && !pending && !error && (
+        {streamedResults.length === 0 && !pending && !error && (
           <div className="welcome-container">
             <EmptyState
               title="Welcome to Tango"
@@ -111,7 +154,7 @@ export function HomePage() {
         )}
 
         {/* State B: Results */}
-        {(data || pending || error) && (
+        {(streamedResults.length > 0 || pending || error) && (
           <div className="results-container">
             {/* Error Bar */}
             {error && (
@@ -138,10 +181,10 @@ export function HomePage() {
             )}
 
             {/* Card Grid */}
-            {!pending && data && hasResults && (
+            {!pending && hasResults && (
               <>
                 <div className="result-grid">
-                  {data.candidates.slice(0, visibleCount).map((candidate, idx) => (
+                  {visibleCandidates.map((candidate, idx) => (
                     <ResultCard
                       candidate={candidate}
                       index={idx + 1}
@@ -151,7 +194,7 @@ export function HomePage() {
                   ))}
                 </div>
 
-                {visibleCount < data.candidates.length && (
+                {visibleCount < streamedResults.length && (
                   <div style={{ textAlign: 'center', padding: '2rem 1rem' }}>
                     <button
                       className="btn btn-secondary"
@@ -164,7 +207,7 @@ export function HomePage() {
               </>
             )}
 
-            {!pending && data && !hasResults && (
+            {!pending && streamComplete && !hasResults && (
               <div style={{ padding: '2rem', textAlign: 'center', color: '#666' }}>
                 <p>No restaurants matched your criteria. Try adjusting your request.</p>
               </div>
@@ -181,7 +224,7 @@ export function HomePage() {
           onSubmit={handleSubmit}
           onClear={handleClear}
           pending={pending}
-          placeholder={data ? "Refine your search (e.g. 'cheaper', 'in Bellevue')..." : DEFAULT_QUERY}
+          placeholder={streamedResults.length > 0 ? "Refine your search (e.g. 'cheaper', 'in Bellevue')..." : DEFAULT_QUERY}
         />
       </div>
 

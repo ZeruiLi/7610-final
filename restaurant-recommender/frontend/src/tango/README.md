@@ -1,6 +1,6 @@
-# Tango 组件导出说明
+# TastyGo 组件导出说明
 
-此目录用于存放从 NetEase Tango 设计器导出的组件片段（React + TSX）。
+TastyGo 的部分界面最初由 NetEase Tango 设计器生成。此目录用于存放这些导出的组件片段（React + TSX）。
 
 建议流程：
 

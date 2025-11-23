@@ -17,12 +17,14 @@ def build_report(spec: PreferenceSpec, ranked: List[Candidate], bbox: Tuple[floa
         "zip": "ZIP",
         "area": "Area",
         "city": "City",
+        "coord": "Coord",
     }
     anchor_map_zh = {
         "poi": "兴趣点",
         "zip": "邮编",
         "area": "区域",
         "city": "城市",
+        "coord": "坐标",
     }
     anchor_en = f"{anchor_map.get(anchor_type, 'City')} - {anchor_label}".strip()
     anchor_zh = f"{anchor_map_zh.get(anchor_type, '城市')}锚点 - {anchor_label}".strip()
@@ -81,10 +83,13 @@ def build_report(spec: PreferenceSpec, ranked: List[Candidate], bbox: Tuple[floa
             f"#### {idx}. {p.name}",
             f"- Address: {p.address or 'Not provided'}",
             f"- Score: {c.score:.3f}",
+            f"- Rating: {(c.derived_rating or 0.0):.1f}/5 (source: {c.rating_source or 'unknown'})",
+            f"- Match mode: {'Strict' if (c.match_mode or '').lower() != 'relaxed' else 'Relaxed'}",
             f"- Sources: {source_links} (trust {c.source_trust_score:.2f}, {c.source_hits} links)",
             f"- Distance: {c.distance_miles:.1f} miles ({c.distance_km:.1f} km)",
             f"- Map: {link}",
             f"- Hard constraints status: {'OK' if not c.violated_constraints and c.is_open_ok else 'Needs review'}",
+            ("- Constraint violations: " + ", ".join(c.violated_constraints)) if c.violated_constraints else "- Constraint violations: None",
             (f"- Signature dishes: {dishes}" if dishes else "- Signature dishes: not captured"),
             ("- Highlights:\n" + "\n".join(f"  * {text}" for text in reasons) if reasons else "- Highlights: not available"),
             "",
