@@ -29,11 +29,28 @@ export function RestaurantDetailModal({ candidate, onClose }: RestaurantDetailMo
                 <div className="modal-body">
                     <h2 className="modal-title">{place.name}</h2>
                     <div className="modal-meta">
-                        <span className="modal-rating">⭐ {place.rating ? place.rating.toFixed(1) : 'N/A'}</span>
+                        <span className="modal-rating">⭐ {(candidate.derived_rating ?? candidate.score * 5).toFixed(1)} / 5 ({candidate.rating_source || 'model'})</span>
+                        {candidate.rating_source !== 'model_score' && (
+                            <>
+                                <span className="modal-dot">·</span>
+                                <span className="modal-rating">Model est {Math.max(0.5, Math.min(5, candidate.score * 5)).toFixed(1)}/5</span>
+                            </>
+                        )}
                         <span className="modal-dot">·</span>
                         <span className="modal-distance">{candidate.distance_miles.toFixed(1)} mi</span>
                         <span className="modal-dot">·</span>
                         <span className="modal-address">{place.address}</span>
+                    </div>
+                    <div className="modal-meta" style={{ gap: '0.75rem', flexWrap: 'wrap' }}>
+                        <span className="modal-score-chip">Score {candidate.score.toFixed(3)}</span>
+                        <span className={`modal-match-chip ${candidate.match_mode === 'relaxed' ? 'chip-relaxed' : 'chip-strict'}`}>
+                            {candidate.match_mode === 'relaxed' ? 'Relaxed match' : 'Strict match'}
+                        </span>
+                        {!candidate.is_open_ok || (candidate.violated_constraints && candidate.violated_constraints.length > 0) ? (
+                            <span className="modal-warning-chip">Does not fully meet all constraints</span>
+                        ) : (
+                            <span className="modal-good-chip">Meets key constraints</span>
+                        )}
                     </div>
 
                     <div className="modal-tags">
@@ -70,6 +87,26 @@ export function RestaurantDetailModal({ candidate, onClose }: RestaurantDetailMo
                                     <span key={idx} className="dish-tag">{dish}</span>
                                 ))}
                             </div>
+                        </section>
+                    )}
+
+                    {candidate.violated_constraints.length > 0 && (
+                        <section className="modal-section">
+                            <h3>Constraints not fully met</h3>
+                            <ul className="modal-list warning">
+                                {candidate.violated_constraints.map((item, idx) => <li key={idx}>{item}</li>)}
+                            </ul>
+                        </section>
+                    )}
+
+                    {candidate.debug_scores && Object.keys(candidate.debug_scores).length > 0 && (
+                        <section className="modal-section">
+                            <h3>Score breakdown</h3>
+                            <ul className="modal-list">
+                                {Object.entries(candidate.debug_scores).map(([k, v]) => (
+                                    <li key={k}>{k}: {v.toFixed(3)}</li>
+                                ))}
+                            </ul>
                         </section>
                     )}
 

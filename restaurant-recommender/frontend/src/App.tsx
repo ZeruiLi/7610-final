@@ -6,8 +6,8 @@ export function App() {
     <div className="app-shell">
       <header className="app-header">
         <div className="brand">
-          <span className="brand-badge">Tango</span>
-          <h1 className="brand-title">餐厅推荐助手</h1>
+          <span className="brand-badge">TastyGo</span>
+          <h1 className="brand-title">TastyGo 餐厅推荐助手</h1>
         </div>
         <p className="brand-subtitle">
           自然语言描述需求，结合 Geoapify 与 LLM 实时生成可信赖的推荐。

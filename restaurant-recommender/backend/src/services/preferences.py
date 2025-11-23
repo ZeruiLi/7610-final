@@ -54,16 +54,26 @@ SYSTEM_PROMPT = (
 )
 
 
+ALLOWED_CUISINES = [
+    # Keep in sync with ranking.CUISINE_PATTERNS
+    "Sichuan",
+    "Hotpot",
+    "Japanese",
+    "Korean",
+    "Thai",
+    "Italian",
+    "Pizza",
+    "Mexican",
+    "Vegan",
+    "Seafood",
+    "BBQ",
+]
+
+
 class PreferencesParser:
     def __init__(self, cfg: Configuration) -> None:
         self.cfg = cfg
         self.llm = self._init_llm(cfg)
-        self.agent = ToolAwareSimpleAgent(
-            name="PreferenceParser",
-            llm=self.llm,
-            system_prompt=SYSTEM_PROMPT,
-            enable_tool_calling=False,
-        )
 
     def _init_llm(self, cfg: Configuration) -> HelloAgentsLLM:
         kwargs: dict[str, Any] = {"temperature": 0.0}
@@ -80,24 +90,53 @@ class PreferencesParser:
             kwargs["api_key"] = cfg.llm_api_key
         return HelloAgentsLLM(**kwargs)
 
-    def parse(self, text: str, history: list[dict] | None = None) -> PreferenceSpec:
-        prompt = text
+    def _build_system_prompt(self, draft: dict[str, Any]) -> str:
+        return (
+            "You are a strict preference parser for a restaurant recommender.\n"
+            "Always return a single JSON object only. Never add commentary.\n"
+            "Fields:\n"
+            "- city (string), area (string|null), anchor_poi (string|null), anchor_zip (string|null)\n"
+            "- distance_km (number), people (int|null), budget_per_capita (number|null)\n"
+            "- cuisines (array of strings), must_include_cuisines (array), must_exclude_cuisines (array)\n"
+            "- ambiance (array of strings), rating_min (number|null)\n"
+            "- dining_time (string|null, e.g., 'Tue 20:00' or '20:00'), min_duration_min (int), strict_open_check (bool)\n"
+            "- lang (string)\n"
+            "Hard constraints: must_include_cuisines, must_exclude_cuisines, dining_time with strict_open_check, distance_km.\n"
+            "Soft preferences: cuisines, ambiance, budget_per_capita, rating_min.\n"
+            f"Allowed cuisine labels: {', '.join(ALLOWED_CUISINES)}. Prefer these labels; do NOT invent new labels. "
+            "If the user only says 'spicy' or 'mala', map it to 'Sichuan' as the cuisine preference.\n"
+            "You are given a draft JSON from rule-based parsing; use it as defaults and only fix mistakes or fill missing values.\n"
+            f"DRAFT_SPEC:\n{json.dumps(draft, ensure_ascii=False)}\n"
+            "Return JSON only."
+        )
+
+    def parse(self, text: str, draft: dict[str, Any], history: list[dict] | None = None) -> PreferenceSpec:
+        system_prompt = self._build_system_prompt(draft)
+        agent = ToolAwareSimpleAgent(
+            name="PreferenceParser",
+            llm=self.llm,
+            system_prompt=system_prompt,
+            enable_tool_calling=False,
+        )
+
+        prompt_parts: list[str] = []
         if history:
             hist_str = "\n".join([f"{t['role']}: {t['content']}" for t in history])
-            prompt = f"HISTORY:\n{hist_str}\n\nCURRENT REQUEST: {text}"
-        
-        raw = self.agent.run(prompt)
-        self.agent.clear_history()
+            prompt_parts.append(f"HISTORY:\n{hist_str}")
+        prompt_parts.append(f"CURRENT REQUEST:\n{text}")
+        prompt = "\n\n".join(prompt_parts)
+
+        raw = agent.run(prompt)
+        agent.clear_history()
         cleaned = strip_thinking_tokens(raw).strip()
-        # locate JSON braces if extra text remains
         start = cleaned.find("{")
         end = cleaned.rfind("}")
-        data: dict[str, Any] = {}
-        if start != -1 and end != -1 and end > start:
-            try:
-                data = json.loads(cleaned[start : end + 1])
-            except json.JSONDecodeError:
-                data = {}
+        if start == -1 or end == -1 or end <= start:
+            raise ValueError("LLM did not return a JSON object for preferences.")
+        try:
+            data = json.loads(cleaned[start : end + 1])
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Failed to parse LLM preferences JSON: {exc}") from exc
 
         return _to_spec(self.cfg, data)
 
@@ -384,31 +423,24 @@ def parse_with_rules(cfg: Configuration, text: str) -> PreferenceSpec:
 
 
 def parse_preferences(cfg: Configuration, text: str, history: list[dict] | None = None) -> PreferenceSpec:
-    """Parse preferences using LLM when configured, otherwise fall back to rules."""
+    """Parse preferences using rules + LLM fusion. LLM failures are surfaced as errors."""
     llm_available = bool(cfg.llm_provider or cfg.llm_base_url or cfg.local_llm)
     if not llm_available:
-        combined_text = text
-        if history:
-            combined_text = " ".join([str(t.get("content", "")) for t in history]) + " " + text
-        spec = parse_with_rules(cfg, combined_text)
-        return _post_process_preferences(text, spec)
+        raise ValueError("LLM configuration is missing; please set LOCAL_LLM/LLM_PROVIDER/LLM_BASE_URL.")
 
-    # fallback logic
     combined_text = text
     if history:
-        # Simple concatenation to allow rule-based parser to see previous context (e.g. city)
         combined_text = " ".join([str(t.get("content", "")) for t in history]) + " " + text
 
-    try:
-        parser = PreferencesParser(cfg)
-        spec = parser.parse(text, history)
-        if not spec.city:
-            # attempt rules fallback if city missing, using combined text
-            spec = parse_with_rules(cfg, combined_text)
-        return _post_process_preferences(text, spec)
-    except Exception:
-        # fallback on any LLM failure
-        spec = parse_with_rules(cfg, combined_text)
+    # Step 1: rule-based draft
+    rule_spec = parse_with_rules(cfg, combined_text)
+    draft = rule_spec.__dict__.copy()
+
+    # Step 2: LLM refinement
+    parser = PreferencesParser(cfg)
+    spec = parser.parse(text, draft, history)
+
+    # Step 3: final post-processing (uses original text for intent heuristics)
     return _post_process_preferences(text, spec)
 
 
@@ -424,9 +456,11 @@ def _post_process_preferences(text: str, spec: PreferenceSpec) -> PreferenceSpec
     text_lower = text.lower()
     spicy_keywords = ["spicy", "hot", "mala", "sichuan", "hunan", "chongqing"]
     if any(kw in text_lower for kw in spicy_keywords):
-        # Only add to cuisines for ranking boost, NOT to must_include (which forces filtering)
-        if "spicy" not in [c.lower() for c in spec.cuisines]:
-            spec.cuisines.append("Spicy")
+        # Map spicy intent to a concrete cuisine label that downstream ranking understands.
+        if "Sichuan" not in spec.must_include_cuisines:
+            spec.must_include_cuisines.append("Sichuan")
+        if "Sichuan" not in spec.cuisines:
+            spec.cuisines.append("Sichuan")
 
     anchor_poi, anchor_zip = _extract_location_signals(text)
     if anchor_poi and not spec.anchor_poi:

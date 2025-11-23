@@ -164,6 +164,16 @@ SPICY_TOKENS = {
     "hunan",
 }
 
+SPICY_CATEGORIES = {
+    "catering.restaurant.chinese",
+    "catering.restaurant.thai",
+    "catering.restaurant.mexican",
+    "catering.restaurant.indian",
+    "catering.restaurant.korean",
+    "catering.restaurant.vietnamese",
+    "catering.restaurant.asian",
+}
+
 
 def _place_text(place: Place) -> str:
     return " ".join(filter(None, [place.name, place.address or "", " ".join(place.tags)]))
@@ -182,7 +192,13 @@ def _matches_hotpot(place: Place) -> bool:
 
 def _matches_spicy(place: Place) -> bool:
     text = _place_text(place).lower()
-    return any(token in text for token in SPICY_TOKENS)
+    if any(token in text for token in SPICY_TOKENS):
+        return True
+    # Check if any tag matches spicy categories
+    for tag in place.tags:
+        if tag in SPICY_CATEGORIES:
+            return True
+    return False
 
 
 def _filter_by_required_cuisines(places: List[Place], required: List[str]) -> List[Place]:
@@ -194,6 +210,8 @@ def _filter_by_required_cuisines(places: List[Place], required: List[str]) -> Li
         req_lower = req.lower()
         if req_lower == "hotpot":
             filtered = [p for p in filtered if _matches_hotpot(p)]
+        elif req_lower in {"spicy", "sichuan", "szechuan", "chongqing"}:
+            filtered = [p for p in filtered if _matches_spicy(p)]
         else:
             filtered = [p for p in filtered if req_lower in _place_text(p).lower()]
     return filtered
@@ -351,14 +369,28 @@ def _parse_spec_time(spec: PreferenceSpec) -> Tuple[Optional[str], Optional[int]
 MAX_RADIUS_KM = 20.0
 
 
-def search_candidates(cfg: Configuration, spec: PreferenceSpec) -> tuple[List[Place], tuple[float, float, float, float]]:
+def search_candidates(cfg: Configuration, spec: PreferenceSpec, min_results: int = 5) -> tuple[List[Place], tuple[float, float, float, float]]:
     client = GeoapifyClient(cfg)
     lang = spec.lang or cfg.lang_default or "en"
 
     base_radius = _safe_radius_km(spec, cfg)
+    min_results = max(1, min_results)
 
     required_cuisines = [c.lower() for c in (spec.must_include_cuisines or [])]
     requires_pizza = any("pizza" in cuisine for cuisine in required_cuisines)
+    requires_sichuan = any(cuisine in {"sichuan", "szechuan", "spicy"} for cuisine in required_cuisines)
+    
+    # Define spicy-cuisine categories for targeted search
+    spicy_categories = ",".join([
+        "catering.restaurant.chinese",
+        "catering.restaurant.thai",
+        "catering.restaurant.mexican",
+        "catering.restaurant.indian",
+        "catering.restaurant.korean",
+        "catering.restaurant.vietnamese",
+        "catering.restaurant.asian",
+    ])
+    
     category_attempts: list[tuple[Optional[str], Optional[str], bool]]
     if requires_pizza:
         category_attempts = [
@@ -366,10 +398,16 @@ def search_candidates(cfg: Configuration, spec: PreferenceSpec) -> tuple[List[Pl
             ("catering.italian", "category_relaxed:pizza->italian", False),
             ("catering.restaurant", "category_relaxed:pizza->restaurant", False),
         ]
+    elif requires_sichuan:
+        # Multi-stage search for Sichuan/spicy: specific cuisines first, then general
+        category_attempts = [
+            (spicy_categories, None, False),  # Try spicy cuisines without strict enforcement first
+            ("catering.restaurant", "category_relaxed:sichuan->restaurant", False),
+        ]
     else:
         category_attempts = [("catering.restaurant", None, True)]
 
-    preferred_point = _lookup_us_location(spec.city, spec.area)
+    preferred_point = _lookup_us_location(spec.city, spec.area) if spec.city else None
     geocode_text = spec.city or ""
     if spec.area and spec.area not in geocode_text:
         geocode_text = f"{spec.city} {spec.area}" if spec.city else spec.area
@@ -389,8 +427,24 @@ def search_candidates(cfg: Configuration, spec: PreferenceSpec) -> tuple[List[Pl
         anchor_label = label
         return True
 
-    # 1) POI anchor
-    if spec.anchor_poi:
+    def _set_center_from_coord(lat: Optional[float], lon: Optional[float]) -> bool:
+        nonlocal center_lon, center_lat, anchor_type, anchor_label
+        if lat is None or lon is None:
+            return False
+        try:
+            center_lon = float(lon)
+            center_lat = float(lat)
+        except (TypeError, ValueError):
+            return False
+        anchor_type = "coord"
+        anchor_label = f"{center_lat:.4f},{center_lon:.4f}"
+        return True
+
+    # 1) Explicit coordinates from client
+    _set_center_from_coord(spec.anchor_lat, spec.anchor_lon)
+
+    # 2) POI anchor
+    if spec.anchor_poi and center_lon is None:
         poi_query = spec.anchor_poi
         if spec.city and spec.city.lower() not in poi_query.lower():
             poi_query = f"{spec.anchor_poi} {spec.city}"
@@ -400,7 +454,7 @@ def search_candidates(cfg: Configuration, spec: PreferenceSpec) -> tuple[List[Pl
         except GeoapifyError:
             pass
 
-    # 2) ZIP anchor
+    # 3) ZIP anchor
     if center_lon is None and spec.anchor_zip:
         try:
             if _set_center_from_geo(client.geocode(spec.anchor_zip, lang=lang), "zip", spec.anchor_zip):
@@ -408,15 +462,15 @@ def search_candidates(cfg: Configuration, spec: PreferenceSpec) -> tuple[List[Pl
         except GeoapifyError:
             pass
 
-    # 3) Known area/city registry
+    # 4) Known area/city registry
     if center_lon is None and preferred_point:
         center_lon, center_lat = preferred_point
         anchor_type = "area" if spec.area else "city"
         anchor_label = spec.area or spec.city or ""
 
-    # 4) Fallback geocode
+    # 5) Fallback geocode
     geo: GeocodeResult | None = None
-    if center_lon is None:
+    if center_lon is None and geocode_text:
         try:
             geo = client.geocode(geocode_text, lang=lang)
         except GeoapifyError:
@@ -426,20 +480,22 @@ def search_candidates(cfg: Configuration, spec: PreferenceSpec) -> tuple[List[Pl
                 geo = client.geocode(spec.city, lang=lang)
             except GeoapifyError:
                 geo = None
-        if not geo:
-            raise ValueError("Unable to locate the requested city/area. Please verify the input.")
-        _set_center_from_geo(geo, "city", geocode_text or spec.city or "")
+        if geo:
+            _set_center_from_geo(geo, "city", geocode_text or spec.city or "")
 
-    # 5) Sanity fallback
+    # 6) Sanity fallback
     if center_lon is None or center_lat is None:
         raise ValueError("Failed to determine search anchor.")
 
     spec.anchor_type = anchor_type or ("area" if spec.area else "city")
     spec.anchor_label = anchor_label or spec.anchor_poi or spec.anchor_zip or spec.area or spec.city or ""
+    default_bbox = expand_bbox_from_center(center_lon, center_lat, base_radius + cfg.bbox_padding_km)
 
     radius = base_radius
-    final_bbox: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    final_bbox: tuple[float, float, float, float] = default_bbox
     relaxed_capture: Optional[tuple[list[Place], tuple[float, float, float, float], float]] = None
+    collected: list[Place] = []
+    seen: set[Tuple[str, int, int]] = set()
 
     while radius <= MAX_RADIUS_KM + 1e-6:
         effective_radius = radius + cfg.bbox_padding_km
@@ -452,7 +508,7 @@ def search_candidates(cfg: Configuration, spec: PreferenceSpec) -> tuple[List[Pl
                     center_lat,
                     radius_km=effective_radius,
                     categories=categories,
-                    limit=cfg.geoapify_max_results,
+                    limit=60,  # Increased to ensure enough candidates
                     lang=lang,
                 )
             except GeoapifyError:
@@ -488,6 +544,17 @@ def search_candidates(cfg: Configuration, spec: PreferenceSpec) -> tuple[List[Pl
 
             target_day, start_minutes = _parse_spec_time(spec)
             working_places_after_open = _apply_opening_filter(working_places, spec, target_day, start_minutes)
+            if not working_places_after_open and spec.must_include_cuisines and enforce_required:
+                relaxed = list(working_places)
+                for place in relaxed:
+                    violations = getattr(place, "_violations", [])
+                    if not isinstance(violations, list):
+                        violations = []
+                    violations.append("missing_required_cuisine")
+                    setattr(place, "_violations", violations)
+                if spec.must_exclude_cuisines:
+                    relaxed = _filter_by_excluded_cuisines(relaxed, spec.must_exclude_cuisines)
+                working_places_after_open = _apply_opening_filter(relaxed, spec, target_day, start_minutes)
 
             all_open_unknown = all(getattr(place, "_open_status", None) is None for place in working_places)
 
@@ -515,6 +582,19 @@ def search_candidates(cfg: Configuration, spec: PreferenceSpec) -> tuple[List[Pl
 
             working_places = working_places_after_open
 
+            # Tag strict vs. relaxed matches for ranking, but don't re-filter
+            if spec.must_include_cuisines and working_places:
+                strict_matches = _filter_by_required_cuisines(working_places, spec.must_include_cuisines)
+                strict_ids = {id(p) for p in strict_matches}
+                for place in working_places:
+                    if id(place) not in strict_ids:
+                        violations = getattr(place, "_violations", [])
+                        if not isinstance(violations, list):
+                            violations = []
+                        if "missing_required_cuisine" not in violations:
+                            violations.append("missing_required_cuisine")
+                        setattr(place, "_violations", violations)
+
             if working_places:
                 if radius > base_radius:
                     for place in working_places:
@@ -534,16 +614,28 @@ def search_candidates(cfg: Configuration, spec: PreferenceSpec) -> tuple[List[Pl
                         relaxed_capture = ([p for p in working_places], final_bbox, radius)
                     continue
 
-                spec.distance_km = radius
-                return working_places, final_bbox
+                for place in working_places:
+                    key = (place.name.strip().lower(), round(place.lon, 5), round(place.lat, 5))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    collected.append(place)
+
+                if len(collected) >= min_results:
+                    spec.distance_km = radius
+                    return collected[:min_results], final_bbox
 
         if radius >= MAX_RADIUS_KM:
             break
         radius = min(MAX_RADIUS_KM, radius + max(2.0, radius * 0.5))
+
+    if collected:
+        spec.distance_km = radius
+        return collected, final_bbox
 
     if relaxed_capture:
         places_relaxed, bbox_relaxed, radius_relaxed = relaxed_capture
         spec.distance_km = radius_relaxed
         return places_relaxed, bbox_relaxed
 
-    raise ValueError("No restaurants found within 20 km that satisfy the constraints.")
+    return [], final_bbox

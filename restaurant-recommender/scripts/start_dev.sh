@@ -21,9 +21,35 @@ kill_port() {
   fi
 }
 
+stop_service() {
+  local name="$1"
+  local pid_file="$PID_DIR/$name.pid"
+  if [[ -f "$pid_file" ]]; then
+    local pid
+    pid=$(cat "$pid_file")
+    if kill -0 "$pid" >/dev/null 2>&1; then
+      echo "[start-dev] Stopping $name (PID $pid)"
+      kill "$pid" >/dev/null 2>&1 || true
+      sleep 1
+      if kill -0 "$pid" >/dev/null 2>&1; then
+        echo "[start-dev] Force killing $name"
+        kill -9 "$pid" >/dev/null 2>&1 || true
+      fi
+    fi
+    rm -f "$pid_file"
+  fi
+}
+
+stop_existing_services() {
+  echo "[start-dev] Stopping existing services (if any)"
+  stop_service "backend"
+  stop_service "frontend"
+  kill_port 8010
+  kill_port 5173
+}
+
 start_backend() {
   echo "[start-dev] Starting backend (FastAPI on 8010)"
-  kill_port 8010
 
   local venv_dir="$BACKEND_DIR/.venv"
   if [[ ! -d "$venv_dir" ]]; then
@@ -87,6 +113,7 @@ start_frontend() {
   echo "[start-dev] Frontend PID $pid (logs: $LOG_DIR/frontend.log)"
 }
 
+stop_existing_services
 start_backend
 start_frontend
 
@@ -95,4 +122,3 @@ echo "  - Backend: http://localhost:8010/"
 echo "  - Frontend: http://localhost:5173/"
 echo "[start-dev] To stop:"
 echo "  kill \$(cat '$PID_DIR/backend.pid') \$(cat '$PID_DIR/frontend.pid')"
-

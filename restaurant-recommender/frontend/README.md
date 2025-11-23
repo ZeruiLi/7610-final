@@ -1,6 +1,6 @@
-# Tango-Driven Restaurant Recommender Frontend
+# TastyGo Frontend
 
-React + TypeScript 单页应用，通过 Tango 设计器导出的组件拼装 UI，并调用现有 FastAPI `/recommend` 接口获取餐厅推荐。
+React + TypeScript 单页应用，驱动 TastyGo 餐厅推荐体验。界面组件最初由 NetEase Tango 设计器导出，并调用 FastAPI `/recommend` 接口获取餐厅推荐。
 
 ## 快速开始
 
@@ -30,17 +30,17 @@ src/
   api/recommend.ts       # Fetch 封装，含类型守卫与错误处理
   components/            # 搜索框、结果卡片、Markdown 视图等原子组件
   pages/Home.tsx         # 主页面（状态管理、视图切换、Skeleton）
-  tango/                 # 存放从 Tango 导出的组件片段（示例占位）
+  tango/                 # 存放 TastyGo 使用的（来自 Tango 设计器的）组件片段
   types.ts               # 与 FastAPI 契约对齐的 TypeScript 类型
 ```
 
-## Tango 设计器工作流
+## 设计器工作流
 
 1. 打开 `tango` 仓库中的 playground 或自建设计器，导出组件源码。
 2. 将导出的组件放入 `src/tango/`，并通过 `export * from './tango/...';` 方式在 `components` 中引用。
 3. 调整样式后执行 `npm run lint` / `npm run build` 验证。
 
-更多细节请见 `src/tango/README.md`（后续导出后补充）。
+更多细节请见 `src/tango/README.md`。
 
 ## 环境变量
 
@@ -67,4 +67,4 @@ src/
 ## 相关文档
 
 - [FastAPI 后端 README](../backend/README.md)
-- [Tango 项目主页](https://github.com/NetEase/tango)
+- [Tango 项目主页](https://github.com/NetEase/tango)（TastyGo UI 组件来源）

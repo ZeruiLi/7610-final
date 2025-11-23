@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 import os
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -90,10 +90,25 @@ def _to_str_list(value: Any) -> list[str]:
     return out
 
 
+def _clamp_rating(value: float) -> float:
+    return max(0.5, min(5.0, value))
+
+
+def _resolve_rating(candidate: Candidate) -> tuple[float, str]:
+    if candidate.derived_rating is not None:
+        return (round(_clamp_rating(candidate.derived_rating), 1), candidate.rating_source or "external")
+    if candidate.place.rating is not None:
+        return (round(_clamp_rating(candidate.place.rating), 1), "geoapify")
+    fallback = _clamp_rating(candidate.score * 5.0)
+    return (round(fallback, 1), "model_score")
+
+
 class RecommendRequest(BaseModel):
     query: str = Field(..., description="Natural-language dining request")
     session_id: Optional[str] = Field(None, description="Session ID for conversation history")
     limit: int = Field(8, description="Number of results to enrich and return details for")
+    user_lat: Optional[float] = Field(None, description="Optional user latitude for precise anchor")
+    user_lon: Optional[float] = Field(None, description="Optional user longitude for precise anchor")
 
 
 class PlacePayload(BaseModel):
@@ -133,6 +148,10 @@ class CandidatePayload(BaseModel):
     source_trust_score: float = 0.0
     is_open_ok: bool = True
     violated_constraints: List[str] = []
+    debug_scores: Dict[str, float] = {}
+    derived_rating: float
+    rating_source: str
+    match_mode: str
 
 
 class RecommendResponse(BaseModel):
@@ -206,12 +225,15 @@ async def recommend(req: RecommendRequest) -> RecommendResponse:
         history = session_manager.get_history(req.session_id) if req.session_id else None
 
         spec: PreferenceSpec = parse_preferences(cfg, req.query, history=history)
-        if not spec.city:
-            raise ValueError("Unable to parse a city from the request. Please include a US city or metro area.")
+        if req.user_lat is not None and req.user_lon is not None:
+            spec.anchor_lat = req.user_lat
+            spec.anchor_lon = req.user_lon
+        if not spec.city and (spec.anchor_lat is None or spec.anchor_lon is None):
+            raise ValueError("Unable to parse a city or coordinate from the request. Please include a US city/area or enable location.")
 
-        places, bbox = search_candidates(cfg, spec)
+        places, bbox = search_candidates(cfg, spec, min_results=req.limit)
         center = ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
-        ranked = rank_candidates(spec, places, bbox_center=center)
+        ranked = rank_candidates(spec, places, bbox_center=center, max_results=req.limit)
         ranked = apply_rerank(cfg, spec, ranked)
 
     # v2: enrich top-K with details and reason
@@ -232,9 +254,21 @@ async def recommend(req: RecommendRequest) -> RecommendResponse:
             c.detail_sources = list(ctx.sources or [])
             c.source_hits = ctx.hits
             c.source_trust_score = ctx.trust_score
+            ratings = []
+            extracted = ctx.extracted or {}
+            if isinstance(extracted.get("ratings"), list):
+                ratings = [r for r in extracted["ratings"] if isinstance(r, (int, float))]
+            if ratings:
+                c.derived_rating = sum(ratings) / len(ratings)
+                c.rating_source = "external"
 
         # Run in parallel
         await asyncio.gather(*(process_candidate(c) for c in ranked[:top_k]))
+
+        for c in ranked:
+            rating_value, rating_source = _resolve_rating(c)
+            c.derived_rating = rating_value
+            c.rating_source = rating_source
 
         md = build_report(spec, ranked, bbox)
         
@@ -298,6 +332,10 @@ async def recommend(req: RecommendRequest) -> RecommendResponse:
             source_trust_score=c.source_trust_score,
             is_open_ok=c.is_open_ok,
             violated_constraints=c.violated_constraints,
+            debug_scores=c.debug_scores,
+            derived_rating=c.derived_rating or 0.0,
+            rating_source=c.rating_source or "model_score",
+            match_mode=c.match_mode,
         )
         for c in ranked
     ]
@@ -307,6 +345,149 @@ async def recommend(req: RecommendRequest) -> RecommendResponse:
         candidates=cands,
         preferences=spec.__dict__,
         bbox=bbox,
+    )
+
+
+@app.post("/recommend-stream")
+async def recommend_stream(req: RecommendRequest):
+    """
+    SSE streaming endpoint for progressive restaurant recommendations.
+    Returns candidates one by one as Server-Sent Events.
+    """
+    import json
+    import asyncio
+    
+    try:
+        cfg = Configuration.from_env()
+        cfg.require_geoapify()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    
+    async def event_generator():
+        try:
+            # Session handling
+            from services.session import session_manager
+            history = session_manager.get_history(req.session_id) if req.session_id else None
+
+            # Parse preferences
+            spec: PreferenceSpec = parse_preferences(cfg, req.query, history=history)
+            if req.user_lat is not None and req.user_lon is not None:
+                spec.anchor_lat = req.user_lat
+                spec.anchor_lon = req.user_lon
+            if not spec.city and (spec.anchor_lat is None or spec.anchor_lon is None):
+                raise ValueError("Unable to parse a city or coordinate from the request.")
+
+            # Search & rank (get all results at once)
+            places, bbox = search_candidates(cfg, spec, min_results=req.limit)
+            center = ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
+            ranked = rank_candidates(spec, places, bbox_center=center, max_results=req.limit)
+            ranked = apply_rerank(cfg, spec, ranked)
+
+            top_k = min(req.limit, len(ranked))
+            
+            # Process and stream candidates one by one
+            from services.details import fetch_details_async
+            
+            for idx, c in enumerate(ranked[:top_k]):
+                # Enrich with details
+                ctx = await fetch_details_async(c.place, lang=spec.lang or cfg.lang_default)
+                reason = await asyncio.to_thread(build_reason, cfg, spec, c.place, ctx)
+                
+                c.highlights = _to_str_list(reason.get("highlights"))
+                c.signature_dishes = _to_str_list(reason.get("signature_dishes"))
+                c.why_matched = _to_str_list(reason.get("why_matched"))
+                c.risks = _to_str_list(reason.get("risks"))
+                c.detail_sources = list(ctx.sources or [])
+                c.source_hits = ctx.hits
+                c.source_trust_score = ctx.trust_score
+                
+                # Extract ratings
+                ratings = []
+                extracted = ctx.extracted or {}
+                if isinstance(extracted.get("ratings"), list):
+                    ratings = [r for r in extracted["ratings"] if isinstance(r, (int, float))]
+                if ratings:
+                    c.derived_rating = sum(ratings) / len(ratings)
+                    c.rating_source = "external"
+                
+                # Resolve final rating
+                rating_value, rating_source = _resolve_rating(c)
+                c.derived_rating = rating_value
+                c.rating_source = rating_source
+                
+                # Convert to payload
+                place_payload = PlacePayload(
+                    name=c.place.name,
+                    address=c.place.address,
+                    lon=c.place.lon,
+                    lat=c.place.lat,
+                    website=c.place.website,
+                    opening_hours=c.place.opening_hours,
+                    datasource_url=c.place.datasource_url,
+                    tags=c.place.tags,
+                    rating=c.place.rating,
+                )
+                
+                cand_payload = CandidatePayload(
+                    place=place_payload,
+                    score=c.score,
+                    reason=c.reason,
+                    pros=c.pros,
+                    cons=c.cons,
+                    highlights=c.highlights,
+                    signature_dishes=c.signature_dishes,
+                    why_matched=c.why_matched,
+                    risks=c.risks,
+                    detail_sources=c.detail_sources,
+                    match_cuisine=c.match_cuisine,
+                    match_ambience=c.match_ambience,
+                    match_budget=c.match_budget,
+                    match_distance=c.match_distance,
+                    match_popularity=c.match_popularity,
+                    primary_tags=c.primary_tags,
+                    reliability_score=c.reliability_score,
+                    distance_km=c.distance_km,
+                    distance_miles=c.distance_miles,
+                    source_hits=c.source_hits,
+                    source_trust_score=c.source_trust_score,
+                    is_open_ok=c.is_open_ok,
+                    violated_constraints=c.violated_constraints,
+                    debug_scores=c.debug_scores,
+                    derived_rating=c.derived_rating,
+                    rating_source=c.rating_source,
+                    match_mode=c.match_mode,
+                )
+                
+                # Create SSE event
+                event_data = {
+                    "index": idx,
+                    "total": top_k,
+                    "tier": c.match_tier,
+                    "candidate": cand_payload.dict(),
+                    "is_initial_batch": idx < 8,
+                }
+                
+                yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                
+                # Small delay for visual effect on initial batch
+                if idx < 8:
+                    await asyncio.sleep(0.1)
+            
+            # Signal completion
+            yield 'data: {"type":"complete"}\n\n'
+            
+        except Exception as exc:
+            logger.exception("streaming failed: {}", exc)
+            error_data = {"type": "error", "message": str(exc)}
+            yield f"data: {json.dumps(error_data)}\n\n"
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        }
     )
 
 

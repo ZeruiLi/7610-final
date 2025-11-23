@@ -40,6 +40,13 @@ export interface CandidatePayload {
   distance_miles: number
   source_hits: number
   source_trust_score: number
+  is_open_ok: boolean
+  violated_constraints: string[]
+  debug_scores?: Record<string, number>
+  derived_rating: number
+  rating_source: string
+  match_mode: string
+  match_tier?: number  // NEW: 1=Perfect Match, 2=Relaxed Match
 }
 
 export interface RecommendResponse {
@@ -53,6 +60,8 @@ export interface RecommendRequestPayload {
   query: string
   session_id?: string
   limit?: number
+  user_lat?: number
+  user_lon?: number
 }
 
 export type RecommendConfigHeader = Record<string, unknown>

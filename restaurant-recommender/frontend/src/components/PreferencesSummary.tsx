@@ -1,5 +1,3 @@
-import React from 'react'
-
 type Preferences = Record<string, unknown>
 
 interface PreferencesSummaryProps {

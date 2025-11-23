@@ -59,10 +59,27 @@ def build_reason(
     if not use_llm:
         dishes = _extract_keywords(detail_text, DISH_KWS)
         highlights: list[str] = []
+        
+        # Fallback using tags if no dishes found
+        if not dishes and place.tags:
+            # Filter out generic tags
+            meaningful_tags = []
+            for t in place.tags:
+                clean = t.replace("catering.", "").replace("_", " ")
+                if clean not in ("restaurant", "food", "point of interest"):
+                    meaningful_tags.append(clean.title())
+            
+            if meaningful_tags:
+                highlights.append(f"Specializes in: {', '.join(meaningful_tags[:3])}")
+        
         if dishes:
             highlights.append(f"Known for: {', '.join(dishes[:4])}")
+            
         if detail.extracted.get("ratings"):
             highlights.append(f"Ratings reported: {', '.join(detail.extracted['ratings'][:2])}")
+        elif place.rating:
+            highlights.append(f"Overall rating: {place.rating}/5.0")
+            
         if detail.hits:
             highlights.append(f"{detail.hits} reliable sources referenced")
 
@@ -94,7 +111,7 @@ def build_reason(
         system_prompt=(
             "You are a restaurant guide. Using the diner preferences, venue metadata and the"
             " trusted sources below, produce a JSON object with: \n"
-            "- highlights: 3-5 bullet points grounded in the sources\n"
+            "- highlights: 3-5 bullet points grounded in the sources. If sources are thin, use the provided TAGS and RATING to infer highlights.\n"
             "- signature_dishes: 2-4 popular dishes or categories\n"
             "- why_matched: reasons this venue fits the stated preferences (cuisine/ambience/budget/etc.)\n"
             "- risks: uncertainties or caveats the diner should verify\n"
@@ -102,14 +119,30 @@ def build_reason(
         ),
         enable_tool_calling=False,
     )
+    
+    # Prepare fallback context if sources are empty
+    fallback_context = ""
+    if not detail.hits:
+        fallback_context = f"NOTE: No external reviews found. Rely on TAGS: {place.tags} and RATING: {place.rating}."
+        
     prompt = (
         "DINER PREFERENCES:" + json.dumps(spec.__dict__, ensure_ascii=False) + "\n"
         f"RESTAURANT: name={place.name}, address={place.address}, lat={place.lat}, lon={place.lon}\n"
+        f"TAGS: {place.tags}, RATING: {place.rating}\n"
         f"TRUST_SCORE: {detail.trust_score}, SOURCE_COUNT: {detail.hits}\n"
         f"SOURCES SNIPPET:\n{detail_text[:3000]}\n"
+        f"{fallback_context}\n"
         "Return JSON object only."
     )
-    raw = agent.run(prompt)
+    try:
+        raw = agent.run(prompt)
+    except Exception:
+        return {
+            "highlights": [],
+            "signature_dishes": [],
+            "why_matched": [],
+            "risks": ["LLM reasoning failed; review sources manually if available."],
+        }
     agent.clear_history()
     text = strip_thinking_tokens(raw)
     s, e = text.find("{"), text.rfind("}")

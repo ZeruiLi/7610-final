@@ -7,19 +7,42 @@ from utils import haversine_km
 
 
 KM_TO_MILES = 0.621371
-MAX_TOP_RESULTS = 5
 
 CUISINE_PATTERNS: Dict[str, Dict[str, Iterable[str]]] = {
-    "Sichuan": {"keywords": ["sichuan", "szechuan"], "tags": ["catering.sichuan"]},
+    "Sichuan": {
+        "keywords": ["sichuan", "szechuan", "spicy", "mala", "chongqing"], 
+        "tags": ["catering.sichuan", "catering.restaurant.chinese", "catering.restaurant.asian"]
+    },
     "Hotpot": {"keywords": ["hotpot", "hot pot"], "tags": ["catering.hotpot"]},
-    "Japanese": {"keywords": ["japanese", "sushi", "ramen"], "tags": ["catering.japanese"]},
-    "Korean": {"keywords": ["korean", "bbq", "soondubu"], "tags": ["catering.korean"]},
-    "Thai": {"keywords": ["thai"], "tags": ["catering.thai"]},
-    "Italian": {"keywords": ["italian", "pasta", "pizza"], "tags": ["catering.italian"]},
-    "Pizza": {"keywords": ["pizza", "pizzeria", "slice"], "tags": ["catering.pizza", "catering.restaurant.pizza"]},
-    "Mexican": {"keywords": ["mexican", "taco", "taqueria"], "tags": ["catering.mexican"]},
+    "Japanese": {
+        "keywords": ["japanese", "sushi", "ramen"], 
+        "tags": ["catering.japanese", "catering.restaurant.japanese"]
+    },
+    "Korean": {
+        "keywords": ["korean", "bbq", "soondubu"], 
+        "tags": ["catering.korean", "catering.restaurant.korean"]
+    },
+    "Thai": {
+        "keywords": ["thai"], 
+        "tags": ["catering.thai", "catering.restaurant.thai"]
+    },
+    "Italian": {
+        "keywords": ["italian", "pasta", "pizza"], 
+        "tags": ["catering.italian", "catering.restaurant.italian"]
+    },
+    "Pizza": {
+        "keywords": ["pizza", "pizzeria", "slice"], 
+        "tags": ["catering.pizza", "catering.restaurant.pizza"]
+    },
+    "Mexican": {
+        "keywords": ["mexican", "taco", "taqueria"], 
+        "tags": ["catering.mexican", "catering.restaurant.mexican"]
+    },
     "Vegan": {"keywords": ["vegan", "plant-based"], "tags": ["catering.vegan"]},
-    "Seafood": {"keywords": ["seafood", "oyster", "lobster", "crab"], "tags": ["catering.seafood"]},
+    "Seafood": {
+        "keywords": ["seafood", "oyster", "lobster", "crab"], 
+        "tags": ["catering.seafood"]
+    },
     "BBQ": {"keywords": ["bbq", "barbecue"], "tags": ["catering.bbq"]},
 }
 
@@ -75,9 +98,12 @@ def rank_candidates(
     places: List[Place],
     *,
     bbox_center: Tuple[float, float],  # lon, lat
+    max_results: int = 24,
 ) -> List[Candidate]:
     qualified: list[Candidate] = []
     fallback: list[Candidate] = []
+
+    max_results = max(1, max_results)
 
     pref_cuisines = [c.lower() for c in (spec.cuisines or [])]
     pref_cuisines.extend(c.lower() for c in (spec.must_include_cuisines or []))
@@ -118,13 +144,32 @@ def rank_candidates(
 
         reliability = (rating_score * 0.5) + (has_website * 0.2) + (min(len(cuisine_matches), 3) / 3.0 * 0.3)
 
+        # Check violations and apply penalties
+        violations = getattr(place, "_violations", [])
+        if not isinstance(violations, list):
+            violations = []
+        
+        violation_penalty = 0.0
+        if "missing_required_cuisine" in violations:
+            violation_penalty += 0.3  # Significant penalty for not matching required cuisine
+        if "category_relaxed" in str(violations):
+            violation_penalty += 0.1  # Additional penalty for category relaxation
+        
         total_score = (
             cuisine_score * 0.35
             + distance_score * 0.25
             + rating_score * 0.25
             + ambience_score * 0.1
             + has_website * 0.05
+            - violation_penalty  # Apply penalty
         )
+        debug_scores = {
+            "cuisine": round(cuisine_score, 4),
+            "distance": round(distance_score, 4),
+            "rating": round(rating_score, 4),
+            "ambience": round(ambience_score, 4),
+            "website": round(has_website, 4),
+        }
 
         pros: list[str] = []
         cons: list[str] = []
@@ -167,6 +212,11 @@ def rank_candidates(
         if spec.must_include_cuisines and not match_cuisine:
             violations.append("missing_required_cuisine")
 
+        match_mode = "relaxed" if "missing_required_cuisine" in violations else "strict"
+        
+        # Assign match tier: 1=perfect match, 2=relaxed match
+        match_tier = 2 if "missing_required_cuisine" in violations else 1
+
         candidate = Candidate(
             place=place,
             score=float(round(total_score, 4)),
@@ -178,6 +228,7 @@ def rank_candidates(
             match_budget=bool(spec.budget_per_capita),
             match_distance=dist_km <= radius_km * 1.1,
             match_popularity=False,
+            match_tier=match_tier,  # NEW: set tier
             primary_tags=cuisine_matches,
             reliability_score=float(round(reliability, 4)),
             distance_km=float(round(dist_km, 3)),
@@ -186,35 +237,25 @@ def rank_candidates(
             source_trust_score=0.0,
             is_open_ok=open_status is True or (open_status is None and not spec.strict_open_check),
             violated_constraints=violations,
+            match_mode=match_mode,
+            debug_scores=debug_scores,
         )
 
-        meets_cuisine = not spec.must_include_cuisines or candidate.match_cuisine
-        meets_open = candidate.is_open_ok
-        if meets_cuisine and meets_open:
-            qualified.append(candidate)
-        else:
+        if open_status is False or (open_status is None and spec.strict_open_check):
             fallback.append(candidate)
+        else:
+            qualified.append(candidate)
 
-    qualified.sort(key=lambda c: c.score, reverse=True)
-    fallback.sort(key=lambda c: c.score, reverse=True)
+    # NEW: Two-tier sorting - tier first (ASC), then score (DESC)
+    qualified.sort(key=lambda c: (c.match_tier, -c.score))
+    fallback.sort(key=lambda c: (c.match_tier, -c.score))
 
-    results: list[Candidate] = qualified[:MAX_TOP_RESULTS]
+    results: list[Candidate] = []
+    if qualified:
+        results.extend(qualified[:max_results])
 
-    if len(results) < MAX_TOP_RESULTS and fallback:
-        remaining_slots = MAX_TOP_RESULTS - len(results)
-        non_target_limit = 1 if spec.must_include_cuisines else remaining_slots
-        allowed_fallback: list[Candidate] = []
+    if len(results) < max_results and fallback:
+        remaining_slots = max_results - len(results)
+        results.extend(fallback[:remaining_slots])
 
-        for cand in fallback:
-            if spec.must_include_cuisines and not cand.match_cuisine:
-                if non_target_limit <= 0:
-                    continue
-                non_target_limit -= 1
-            allowed_fallback.append(cand)
-            if len(allowed_fallback) >= remaining_slots:
-                break
-
-        if allowed_fallback:
-            results.extend(allowed_fallback)
-
-    return results[:MAX_TOP_RESULTS]
+    return results[:max_results]
