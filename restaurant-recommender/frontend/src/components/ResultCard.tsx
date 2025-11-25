@@ -35,6 +35,63 @@ export function ResultCard({ candidate, onClick }: ResultCardProps) {
           ) : null}
         </div>
 
+        {/* Match Indicators - Always visible */}
+        <div className="card-matches" style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: '4px',
+          marginTop: '8px',
+        }}>
+          {candidate.match_cuisine && (
+            <span className="match-indicator" style={{
+              backgroundColor: '#10b981',
+              color: 'white',
+              padding: '2px 6px',
+              borderRadius: '3px',
+              fontSize: '10px',
+              fontWeight: '500',
+            }}>
+              🍽️ Cuisine
+            </span>
+          )}
+          {candidate.match_ambience && (
+            <span className="match-indicator" style={{
+              backgroundColor: '#8b5cf6',
+              color: 'white',
+              padding: '2px 6px',
+              borderRadius: '3px',
+              fontSize: '10px',
+              fontWeight: '500',
+            }}>
+              ✨ Ambience
+            </span>
+          )}
+          {candidate.match_budget && (
+            <span className="match-indicator" style={{
+              backgroundColor: '#f59e0b',
+              color: 'white',
+              padding: '2px 6px',
+              borderRadius: '3px',
+              fontSize: '10px',
+              fontWeight: '500',
+            }}>
+              💰 Budget
+            </span>
+          )}
+          {candidate.match_distance && (
+            <span className="match-indicator" style={{
+              backgroundColor: '#3b82f6',
+              color: 'white',
+              padding: '2px 6px',
+              borderRadius: '3px',
+              fontSize: '10px',
+              fontWeight: '500',
+            }}>
+              📍 Distance
+            </span>
+          )}
+        </div>
+
         <div className="card-footer">
           <div className="card-rating">
             ⭐ {ratingValue.toFixed(1)} / 5 <span className="card-rating-source">({ratingSource})</span>
@@ -51,29 +108,29 @@ export function ResultCard({ candidate, onClick }: ResultCardProps) {
   )
 }
 
-// TierBadge Component
+// TierBadge Component - Moved to top-right to avoid overlap
 function TierBadge({ tier }: { tier: number }) {
   const isPerfect = tier === 1
   const bgColor = isPerfect ? '#10b981' : '#f59e0b' // green-500 : yellow-500
   const icon = isPerfect ? '✓' : '⚠'
-  const text = isPerfect ? 'Perfect Match' : 'Relaxed Match'
+  const text = isPerfect ? 'Perfect' : 'Relaxed'  // Shorter text
 
   return (
     <div
       style={{
         position: 'absolute',
         top: '8px',
-        left: '8px',
+        right: '8px',  // Changed from left to right
         backgroundColor: bgColor,
         color: 'white',
-        padding: '4px 8px',
+        padding: '3px 7px',
         borderRadius: '4px',
-        fontSize: '11px',
+        fontSize: '10px',
         fontWeight: '600',
         zIndex: 10,
         display: 'flex',
         alignItems: 'center',
-        gap: '4px',
+        gap: '3px',
         boxShadow: '0 2px 4px rgba(0,0,0,0.2)',
       }}
     >

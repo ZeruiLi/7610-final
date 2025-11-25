@@ -55,17 +55,25 @@ export function HomePage() {
 
       try {
         // Use streaming API
-        for await (const result of recommendStream(trimmed, {
+        for await (const event of recommendStream(trimmed, {
           signal: controller.signal,
           sessionId: sessionId,
           limit: 24,
           userLocation: userLocation ?? undefined,
         })) {
-          setStreamedResults(prev => [...prev, result])
+          if (event.type === 'metadata') {
+            // First event: metadata with preferences and bbox
+            setPreferences(event.preferences)
+            setBbox(event.bbox)
+            console.info('[Home] Received metadata', event.preferences)
+          } else if (event.type === 'candidate') {
+            // Subsequent events: candidates
+            setStreamedResults(prev => [...prev, event])
 
-          // Add small delay for initial batch visual effect
-          if (result.is_initial_batch && result.index < 7) {
-            await new Promise(resolve => setTimeout(resolve, 100))
+            // Add small delay for initial batch visual effect
+            if (event.is_initial_batch && event.index < 7) {
+              await new Promise(resolve => setTimeout(resolve, 100))
+            }
           }
         }
 

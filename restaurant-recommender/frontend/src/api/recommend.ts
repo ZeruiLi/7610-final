@@ -122,7 +122,14 @@ export async function recommend(
 }
 
 // NEW: Streaming API types and function
+export interface StreamedMetadata {
+  type: 'metadata'
+  preferences: Record<string, unknown>
+  bbox: [number, number, number, number]
+}
+
 export interface StreamedResult {
+  type: 'candidate'
   index: number
   total: number
   tier: number
@@ -130,10 +137,12 @@ export interface StreamedResult {
   is_initial_batch: boolean
 }
 
+export type StreamEvent = StreamedMetadata | StreamedResult
+
 export async function* recommendStream(
   query: string,
   opts?: { signal?: AbortSignal; sessionId?: string; limit?: number; userLocation?: { lat: number; lon: number } },
-): AsyncGenerator<StreamedResult, void, unknown> {
+): AsyncGenerator<StreamEvent, void, unknown> {
   const payload: RecommendRequestPayload = {
     query,
     session_id: opts?.sessionId,
@@ -201,8 +210,16 @@ export async function* recommendStream(
               throw new ApiError(`流式错误: ${data.message}`, { kind: 'http' })
             }
 
-            // Regular event
-            yield data as unknown as StreamedResult
+            if (data.type === 'metadata') {
+              // Metadata event with preferences and bbox
+              yield data as unknown as StreamedMetadata
+              continue
+            }
+
+            if (data.type === 'candidate') {
+              // Regular candidate event
+              yield data as unknown as StreamedResult
+            }
           } catch (error) {
             if (error instanceof ApiError) throw error
             console.error('[recommendStream] parse_error', dataJson, error)
