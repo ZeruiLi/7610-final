@@ -369,43 +369,10 @@ def _parse_spec_time(spec: PreferenceSpec) -> Tuple[Optional[str], Optional[int]
 MAX_RADIUS_KM = 20.0
 
 
-def search_candidates(cfg: Configuration, spec: PreferenceSpec, min_results: int = 5) -> tuple[List[Place], tuple[float, float, float, float]]:
+def resolve_anchor(cfg: Configuration, spec: PreferenceSpec) -> Tuple[float, float, str, str]:
+    """Resolve the search anchor (lat, lon) from the preference spec."""
     client = GeoapifyClient(cfg)
     lang = spec.lang or cfg.lang_default or "en"
-
-    base_radius = _safe_radius_km(spec, cfg)
-    min_results = max(1, min_results)
-
-    required_cuisines = [c.lower() for c in (spec.must_include_cuisines or [])]
-    requires_pizza = any("pizza" in cuisine for cuisine in required_cuisines)
-    requires_sichuan = any(cuisine in {"sichuan", "szechuan", "spicy"} for cuisine in required_cuisines)
-    
-    # Define spicy-cuisine categories for targeted search
-    spicy_categories = ",".join([
-        "catering.restaurant.chinese",
-        "catering.restaurant.thai",
-        "catering.restaurant.mexican",
-        "catering.restaurant.indian",
-        "catering.restaurant.korean",
-        "catering.restaurant.vietnamese",
-        "catering.restaurant.asian",
-    ])
-    
-    category_attempts: list[tuple[Optional[str], Optional[str], bool]]
-    if requires_pizza:
-        category_attempts = [
-            ("catering.pizza", None, True),
-            ("catering.italian", "category_relaxed:pizza->italian", False),
-            ("catering.restaurant", "category_relaxed:pizza->restaurant", False),
-        ]
-    elif requires_sichuan:
-        # Multi-stage search for Sichuan/spicy: specific cuisines first, then general
-        category_attempts = [
-            (spicy_categories, None, False),  # Try spicy cuisines without strict enforcement first
-            ("catering.restaurant", "category_relaxed:sichuan->restaurant", False),
-        ]
-    else:
-        category_attempts = [("catering.restaurant", None, True)]
 
     preferred_point = _lookup_us_location(spec.city, spec.area) if spec.city else None
     geocode_text = spec.city or ""
@@ -487,8 +454,59 @@ def search_candidates(cfg: Configuration, spec: PreferenceSpec, min_results: int
     if center_lon is None or center_lat is None:
         raise ValueError("Failed to determine search anchor.")
 
-    spec.anchor_type = anchor_type or ("area" if spec.area else "city")
-    spec.anchor_label = anchor_label or spec.anchor_poi or spec.anchor_zip or spec.area or spec.city or ""
+    return center_lon, center_lat, anchor_type or "city", anchor_label or ""
+
+
+def search_candidates(
+    cfg: Configuration, 
+    spec: PreferenceSpec, 
+    min_results: int = 5,
+    anchor: Optional[Tuple[float, float, str, str]] = None
+) -> tuple[List[Place], tuple[float, float, float, float]]:
+    client = GeoapifyClient(cfg)
+    lang = spec.lang or cfg.lang_default or "en"
+
+    base_radius = _safe_radius_km(spec, cfg)
+    min_results = max(1, min_results)
+
+    required_cuisines = [c.lower() for c in (spec.must_include_cuisines or [])]
+    requires_pizza = any("pizza" in cuisine for cuisine in required_cuisines)
+    requires_sichuan = any(cuisine in {"sichuan", "szechuan", "spicy"} for cuisine in required_cuisines)
+    
+    # Define spicy-cuisine categories for targeted search
+    spicy_categories = ",".join([
+        "catering.restaurant.chinese",
+        "catering.restaurant.thai",
+        "catering.restaurant.mexican",
+        "catering.restaurant.indian",
+        "catering.restaurant.korean",
+        "catering.restaurant.vietnamese",
+        "catering.restaurant.asian",
+    ])
+    
+    category_attempts: list[tuple[Optional[str], Optional[str], bool]]
+    if requires_pizza:
+        category_attempts = [
+            ("catering.pizza", None, True),
+            ("catering.italian", "category_relaxed:pizza->italian", False),
+            ("catering.restaurant", "category_relaxed:pizza->restaurant", False),
+        ]
+    elif requires_sichuan:
+        # Multi-stage search for Sichuan/spicy: specific cuisines first, then general
+        category_attempts = [
+            (spicy_categories, None, False),  # Try spicy cuisines without strict enforcement first
+            ("catering.restaurant", "category_relaxed:sichuan->restaurant", False),
+        ]
+    else:
+        category_attempts = [("catering.restaurant", None, True)]
+
+    if anchor:
+        center_lon, center_lat, anchor_type, anchor_label = anchor
+    else:
+        center_lon, center_lat, anchor_type, anchor_label = resolve_anchor(cfg, spec)
+
+    spec.anchor_type = anchor_type
+    spec.anchor_label = anchor_label
     default_bbox = expand_bbox_from_center(center_lon, center_lat, base_radius + cfg.bbox_padding_km)
 
     radius = base_radius

@@ -13,14 +13,16 @@ from pydantic import BaseModel, Field
 
 from config import Configuration
 import requests
+import time
 from models import Candidate, Place, PreferenceSpec
-from services.candidate_search import search_candidates
+from services.candidate_search import search_candidates, resolve_anchor
 from services.preferences import parse_preferences
 from services.ranking import rank_candidates
 from services.rerank import apply_rerank
 from services.report import build_report
 from services.details import fetch_details
 from services.reasoner import build_reason
+from services.bbox_builder import expand_bbox_from_center
 
 
 app = FastAPI(title="Restaurant Recommender (MVP)")
@@ -363,6 +365,7 @@ async def recommend_stream(req: RecommendRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     
+    
     async def event_generator():
         try:
             # Session handling
@@ -370,52 +373,59 @@ async def recommend_stream(req: RecommendRequest):
             history = session_manager.get_history(req.session_id) if req.session_id else None
 
             # Parse preferences
-            spec: PreferenceSpec = parse_preferences(cfg, req.query, history=history)
-            if req.user_lat is not None and req.user_lon is not None:
+            spec = await asyncio.to_thread(parse_preferences, cfg, req.query, history=history)
+            if req.user_lat and req.user_lon:
                 spec.anchor_lat = req.user_lat
                 spec.anchor_lon = req.user_lon
             if not spec.city and (spec.anchor_lat is None or spec.anchor_lon is None):
                 raise ValueError("Unable to parse a city or coordinate from the request.")
 
-            # Search & rank (get all results at once)
-            places, bbox = search_candidates(cfg, spec, min_results=req.limit)
-            center = ((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0)
-            ranked = rank_candidates(spec, places, bbox_center=center, max_results=req.limit)
-            ranked = apply_rerank(cfg, spec, ranked)
+            # 1. Resolve Anchor (Geocoding) - Fast (T=0.2s)
+            # Run in thread to avoid blocking loop
+            anchor = await asyncio.to_thread(resolve_anchor, cfg, spec)
+            center_lon, center_lat, _, _ = anchor
+            
+            # Calculate initial bbox for metadata (default 3km radius)
+            initial_bbox = expand_bbox_from_center(center_lon, center_lat, 3.0)
+            
+            # IMMEDIATELY send metadata event
+            metadata = {
+                "type": "metadata",
+                "preferences": spec.__dict__,
+                "bbox": list(initial_bbox),
+            }
+            yield f"data: {json.dumps(metadata, ensure_ascii=False)}\n\n"
+            await asyncio.sleep(0.01) # Flush
 
-            top_k = min(req.limit, len(ranked))
+            # 2. Search Candidates (POI Search) - Slower (T=2-9s)
+            # Pass resolved anchor to skip re-geocoding
+            places_initial, final_bbox = await asyncio.to_thread(
+                search_candidates, cfg, spec, min_results=8, anchor=anchor
+            )
             
-            # Process and stream candidates one by one
-            from services.details import fetch_details_async
+            # Update bbox if it expanded
+            if final_bbox != initial_bbox:
+                metadata_update = {
+                    "type": "metadata",
+                    "preferences": spec.__dict__,
+                    "bbox": list(final_bbox),
+                }
+                yield f"data: {json.dumps(metadata_update, ensure_ascii=False)}\n\n"
+
+            center = ((final_bbox[0] + final_bbox[2]) / 2.0, (final_bbox[1] + final_bbox[3]) / 2.0)
             
-            for idx, c in enumerate(ranked[:top_k]):
-                # Enrich with details
-                ctx = await fetch_details_async(c.place, lang=spec.lang or cfg.lang_default)
-                reason = await asyncio.to_thread(build_reason, cfg, spec, c.place, ctx)
-                
-                c.highlights = _to_str_list(reason.get("highlights"))
-                c.signature_dishes = _to_str_list(reason.get("signature_dishes"))
-                c.why_matched = _to_str_list(reason.get("why_matched"))
-                c.risks = _to_str_list(reason.get("risks"))
-                c.detail_sources = list(ctx.sources or [])
-                c.source_hits = ctx.hits
-                c.source_trust_score = ctx.trust_score
-                
-                # Extract ratings
-                ratings = []
-                extracted = ctx.extracted or {}
-                if isinstance(extracted.get("ratings"), list):
-                    ratings = [r for r in extracted["ratings"] if isinstance(r, (int, float))]
-                if ratings:
-                    c.derived_rating = sum(ratings) / len(ratings)
-                    c.rating_source = "external"
-                
-                # Resolve final rating
-                rating_value, rating_source = _resolve_rating(c)
-                c.derived_rating = rating_value
-                c.rating_source = rating_source
-                
-                # Convert to payload
+            # Batch 1: Quick initial 8 candidates
+            ranked_batch1 = rank_candidates(spec, places_initial, bbox_center=center, max_results=8)
+            ranked_batch1 = apply_rerank(cfg, spec, ranked_batch1)
+            
+            # Helper to create payload from candidate object
+            def _create_candidate_payload(c) -> CandidatePayload:
+                # Ensure rating is resolved (fallback if None)
+                if c.derived_rating is None:
+                    d_rating, d_source = _resolve_rating(c)
+                else:
+                    d_rating, d_source = c.derived_rating, c.rating_source
+
                 place_payload = PlacePayload(
                     name=c.place.name,
                     address=c.place.address,
@@ -427,8 +437,7 @@ async def recommend_stream(req: RecommendRequest):
                     tags=c.place.tags,
                     rating=c.place.rating,
                 )
-                
-                cand_payload = CandidatePayload(
+                return CandidatePayload(
                     place=place_payload,
                     score=c.score,
                     reason=c.reason,
@@ -453,25 +462,161 @@ async def recommend_stream(req: RecommendRequest):
                     is_open_ok=c.is_open_ok,
                     violated_constraints=c.violated_constraints,
                     debug_scores=c.debug_scores,
-                    derived_rating=c.derived_rating,
-                    rating_source=c.rating_source,
+                    derived_rating=d_rating,
+                    rating_source=d_source or "unknown",
                     match_mode=c.match_mode,
                 )
-                
-                # Create SSE event
+
+            # STAGE 1: Send PARTIAL results immediately (T=0.5s)
+            # This gives immediate visual feedback while details are fetching
+            for idx, c in enumerate(ranked_batch1[:8]):
+                cand_payload = _create_candidate_payload(c)
                 event_data = {
+                    "type": "candidate",
+                    "status": "partial",
                     "index": idx,
-                    "total": top_k,
+                    "total": req.limit,
                     "tier": c.match_tier,
                     "candidate": cand_payload.dict(),
-                    "is_initial_batch": idx < 8,
+                    "is_initial_batch": True,
+                }
+                yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                await asyncio.sleep(0.01)  # Tiny yield to ensure flush
+
+            # STAGE 2: Enrich and send FULL results (T=6s)
+            from services.details import fetch_details_async
+            
+            # Helper function to fully enrich a single candidate
+            async def enrich_candidate(idx: int, c):
+                """Fetch details and build reason for one candidate"""
+                start_time = time.time()
+                try:
+                    # Fetch details (DuckDuckGo search)
+                    ctx = await fetch_details_async(c.place, lang=spec.lang or cfg.lang_default)
+                    
+                    # Build reason (LLM call)
+                    reason = await asyncio.to_thread(build_reason, cfg, spec, c.place, ctx)
+                    
+                    duration = time.time() - start_time
+                    logger.debug(f"Candidate {idx} enriched in {duration:.2f}s")
+                    
+                    # Apply enrichment
+                    c.highlights = _to_str_list(reason.get("highlights"))
+                    c.signature_dishes = _to_str_list(reason.get("signature_dishes"))
+                    c.why_matched = _to_str_list(reason.get("why_matched"))
+                    c.risks = _to_str_list(reason.get("risks"))
+                    c.detail_sources = list(ctx.sources or [])
+                    c.source_hits = ctx.hits
+                    c.source_trust_score = ctx.trust_score
+                    
+                    # Extract ratings
+                    ratings = []
+                    extracted = ctx.extracted or {}
+                    if isinstance(extracted.get("ratings"), list):
+                        ratings = [r for r in extracted["ratings"] if isinstance(r, (int, float))]
+                    if ratings:
+                        c.derived_rating = sum(ratings) / len(ratings)
+                        c.rating_source = "external"
+                    
+                    # Resolve final rating
+                    rating_value, rating_source = _resolve_rating(c)
+                    c.derived_rating = rating_value
+                    c.rating_source = rating_source
+                    
+                    return (idx, c, None)  # Success
+                except Exception as exc:
+                    logger.error(f"Failed to enrich candidate {idx}: {exc}")
+                    return (idx, c, str(exc))  # Return error
+            
+            # Create enrichment tasks for all 8 candidates
+            enrichment_tasks = {}
+            for idx, c in enumerate(ranked_batch1[:8]):
+                task = asyncio.create_task(enrich_candidate(idx, c))
+                enrichment_tasks[task] = (idx, c)
+            
+            # Process and stream results AS SOON AS EACH COMPLETES
+            for completed_task in asyncio.as_completed(enrichment_tasks.keys()):
+                idx, c, error = await completed_task
+                
+                if error:
+                    logger.warning(f"Skipping candidate {idx} due to error: {error}")
+                    continue
+                
+                # Convert to payload (now fully enriched)
+                cand_payload = _create_candidate_payload(c)
+                
+                # Create SSE event and send IMMEDIATELY
+                event_data = {
+                    "type": "candidate",
+                    "status": "full",  # Update existing partial
+                    "index": idx,
+                    "total": req.limit,
+                    "tier": c.match_tier,
+                    "candidate": cand_payload.dict(),
+                    "is_initial_batch": True,
                 }
                 
                 yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
                 
-                # Small delay for visual effect on initial batch
-                if idx < 8:
-                    await asyncio.sleep(0.1)
+                # Small delay for visual effect
+                await asyncio.sleep(0.02)
+            
+            
+            # Batch 2: Continue streaming remaining candidates with TRUE STREAMING
+            if req.limit > 8:
+                # Search for more candidates
+                places_all, _ = search_candidates(cfg, spec, min_results=req.limit)
+                ranked_all = rank_candidates(spec, places_all, bbox_center=center, max_results=req.limit)
+                ranked_all = apply_rerank(cfg, spec, ranked_all)
+                
+                # Get candidates from index 8 onwards (skip first batch)
+                remaining_candidates = ranked_all[8:req.limit]
+                
+                # STAGE 1 (Batch 2): Send PARTIAL results
+                for idx, c in enumerate(remaining_candidates, start=8):
+                    cand_payload = _create_candidate_payload(c)
+                    event_data = {
+                        "type": "candidate",
+                        "status": "partial",
+                        "index": idx,
+                        "total": req.limit,
+                        "tier": c.match_tier,
+                        "candidate": cand_payload.dict(),
+                        "is_initial_batch": False,
+                    }
+                    yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                    await asyncio.sleep(0.01)
+
+                # STAGE 2 (Batch 2): Enrich and send FULL results
+                enrichment_tasks_batch2 = {}
+                for idx, c in enumerate(remaining_candidates, start=8):
+                    task = asyncio.create_task(enrich_candidate(idx, c))
+                    enrichment_tasks_batch2[task] = (idx, c)
+                
+                # Process and stream AS SOON AS EACH COMPLETES
+                for completed_task in asyncio.as_completed(enrichment_tasks_batch2.keys()):
+                    idx, c, error = await completed_task
+                    
+                    if error:
+                        logger.warning(f"Skipping candidate {idx} due to error: {error}")
+                        continue
+                    
+                    cand_payload = _create_candidate_payload(c)
+                    
+                    event_data = {
+                        "type": "candidate",
+                        "status": "full",
+                        "index": idx,
+                        "total": req.limit,
+                        "tier": c.match_tier,
+                        "candidate": cand_payload.dict(),
+                        "is_initial_batch": False,
+                    }
+                    
+                    yield f"data: {json.dumps(event_data, ensure_ascii=False)}\n\n"
+                    
+                    # Small delay for visual effect
+                    await asyncio.sleep(0.02)
             
             # Signal completion
             yield 'data: {"type":"complete"}\n\n'

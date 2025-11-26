@@ -7,6 +7,7 @@ import { ErrorBar } from '../components/ErrorBar'
 import { PreferencesSummary } from '../components/PreferencesSummary'
 import { EmptyState } from '../components/EmptyState'
 import { RestaurantDetailModal } from '../components/RestaurantDetailModal'
+import { ProgressBar, type LoadingStage } from '../components/ProgressBar'
 
 const DEFAULT_QUERY = 'Dinner in Seattle Capitol Hill for 2, vegetarian-friendly, under $45 per person'
 
@@ -15,8 +16,7 @@ export function HomePage() {
   const [streamedResults, setStreamedResults] = useState<StreamedResult[]>([])
   const [preferences, setPreferences] = useState<Record<string, unknown> | null>(null)
   const [bbox, setBbox] = useState<[number, number, number, number] | null>(null)
-  const [pending, setPending] = useState(false)
-  const [streamComplete, setStreamComplete] = useState(false)
+  const [loadingStage, setLoadingStage] = useState<LoadingStage>('idle')
   const [error, setError] = useState<ApiError | null>(null)
   const [sessionId, setSessionId] = useState<string>('')
   const [latency, setLatency] = useState<number | null>(null)
@@ -39,12 +39,11 @@ export function HomePage() {
       const trimmed = value.trim()
       if (!trimmed) return
 
-      setPending(true)
+      setLoadingStage('parsing')
       setError(null)
       setLatency(null)
       setLastQuery(trimmed)
       setStreamedResults([])
-      setStreamComplete(false)
       setVisibleCount(8)
 
       controllerRef.current?.abort()
@@ -55,22 +54,37 @@ export function HomePage() {
 
       try {
         // Use streaming API
-        for await (const result of recommendStream(trimmed, {
+        for await (const event of recommendStream(trimmed, {
           signal: controller.signal,
           sessionId: sessionId,
           limit: 24,
           userLocation: userLocation ?? undefined,
         })) {
-          setStreamedResults(prev => [...prev, result])
-
-          // Add small delay for initial batch visual effect
-          if (result.is_initial_batch && result.index < 7) {
-            await new Promise(resolve => setTimeout(resolve, 100))
+          if (event.type === 'metadata') {
+            // First event: metadata with preferences and bbox
+            setPreferences(event.preferences)
+            setBbox(event.bbox)
+            setLoadingStage('searching')
+            console.info('[Home] Received metadata', event.preferences)
+          } else if (event.type === 'candidate') {
+            // Subsequent events: candidates
+            setLoadingStage('enriching')
+            setStreamedResults(prev => {
+              const existingIndex = prev.findIndex(p => p.index === event.index)
+              if (existingIndex !== -1) {
+                // Update existing candidate (e.g. partial -> full)
+                const newResults = [...prev]
+                newResults[existingIndex] = event
+                return newResults
+              }
+              // Append new candidate
+              return [...prev, event]
+            })
           }
         }
 
         setLatency(performance.now() - started)
-        setStreamComplete(true)
+        setLoadingStage('complete')
         setQuery('') // Clear input after successful submission
 
         // Scroll to top of results
@@ -81,6 +95,7 @@ export function HomePage() {
       } catch (err) {
         if ((err as Error).name === 'AbortError') return
 
+        setLoadingStage('idle')
         if (err instanceof ApiError) {
           setError(err)
         } else {
@@ -90,7 +105,6 @@ export function HomePage() {
         if (controllerRef.current === controller) {
           controllerRef.current = null
         }
-        setPending(false)
       }
     },
     [sessionId, userLocation],
@@ -103,7 +117,7 @@ export function HomePage() {
     setStreamedResults([])
     setPreferences(null)
     setBbox(null)
-    setStreamComplete(false)
+    setLoadingStage('idle')
     setError(null)
     setLastQuery('')
     // Reset session on clear to start fresh context
@@ -131,6 +145,7 @@ export function HomePage() {
 
   const hasResults = streamedResults.length > 0
   const visibleCandidates = streamedResults.slice(0, visibleCount).map(r => r.candidate)
+  const isPending = loadingStage !== 'idle' && loadingStage !== 'complete'
 
   return (
     <section className="home-page">
@@ -144,7 +159,7 @@ export function HomePage() {
       {/* Main Scrollable Content Area */}
       <div className="dashboard-content" ref={resultsContainerRef}>
         {/* State A: Empty / Welcome */}
-        {streamedResults.length === 0 && !pending && !error && (
+        {streamedResults.length === 0 && !isPending && !error && (
           <div className="welcome-container">
             <EmptyState
               title="Welcome to Tango"
@@ -154,7 +169,7 @@ export function HomePage() {
         )}
 
         {/* State B: Results */}
-        {(streamedResults.length > 0 || pending || error) && (
+        {(streamedResults.length > 0 || isPending || error) && (
           <div className="results-container">
             {/* Error Bar */}
             {error && (
@@ -167,8 +182,11 @@ export function HomePage() {
               </div>
             )}
 
-            {/* Loading Skeletons */}
-            {pending && (
+            {/* Progress Bar */}
+            <ProgressBar stage={loadingStage} />
+
+            {/* Loading Skeletons - Only show if NO results yet */}
+            {isPending && !hasResults && (
               <div className="result-grid">
                 {Array.from({ length: 8 }).map((_, idx) => (
                   <div className="result-card-minimal skeleton-card" key={idx}>
@@ -181,7 +199,7 @@ export function HomePage() {
             )}
 
             {/* Card Grid */}
-            {!pending && hasResults && (
+            {hasResults && (
               <>
                 <div className="result-grid">
                   {visibleCandidates.map((candidate, idx) => (
@@ -207,7 +225,7 @@ export function HomePage() {
               </>
             )}
 
-            {!pending && streamComplete && !hasResults && (
+            {loadingStage === 'complete' && !hasResults && !error && (
               <div style={{ padding: '2rem', textAlign: 'center', color: '#666' }}>
                 <p>No restaurants matched your criteria. Try adjusting your request.</p>
               </div>
@@ -223,7 +241,7 @@ export function HomePage() {
           onChange={setQuery}
           onSubmit={handleSubmit}
           onClear={handleClear}
-          pending={pending}
+          pending={isPending}
           placeholder={streamedResults.length > 0 ? "Refine your search (e.g. 'cheaper', 'in Bellevue')..." : DEFAULT_QUERY}
         />
       </div>
