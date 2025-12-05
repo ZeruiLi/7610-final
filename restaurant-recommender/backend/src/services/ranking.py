@@ -9,8 +9,12 @@ from utils import haversine_km
 KM_TO_MILES = 0.621371
 
 CUISINE_PATTERNS: Dict[str, Dict[str, Iterable[str]]] = {
+    "Chinese": {
+        "keywords": ["chinese", "cantonese", "dim sum", "peking", "shanghai"],
+        "tags": ["catering.restaurant.chinese", "catering.restaurant.asian"]
+    },
     "Sichuan": {
-        "keywords": ["sichuan", "szechuan", "spicy", "mala", "chongqing"], 
+        "keywords": ["sichuan", "szechuan", "spicy", "mala", "chongqing", "hunan"], 
         "tags": ["catering.sichuan", "catering.restaurant.chinese", "catering.restaurant.asian"]
     },
     "Hotpot": {"keywords": ["hotpot", "hot pot"], "tags": ["catering.hotpot"]},
@@ -44,6 +48,15 @@ CUISINE_PATTERNS: Dict[str, Dict[str, Iterable[str]]] = {
         "tags": ["catering.seafood"]
     },
     "BBQ": {"keywords": ["bbq", "barbecue"], "tags": ["catering.bbq"]},
+}
+
+CUISINE_PARENT_MAP = {
+    "Sichuan": "Chinese",
+    "Hotpot": "Chinese",
+    "Pizza": "Italian",
+    "Sushi": "Japanese",
+    "Ramen": "Japanese",
+    "Cantonese": "Chinese",
 }
 
 AMBIENCE_PATTERNS: Dict[str, Iterable[str]] = {
@@ -150,8 +163,29 @@ def rank_candidates(
             violations = []
         
         violation_penalty = 0.0
-        if "missing_required_cuisine" in violations:
-            violation_penalty += 0.3  # Significant penalty for not matching required cuisine
+        match_tier = 1
+        
+        # Check cuisine requirements with hierarchy
+        if spec.must_include_cuisines:
+            strict_match = _intersects(spec.must_include_cuisines, cuisine_matches)
+            if not strict_match:
+                # Check parent match
+                parent_match = False
+                for req in spec.must_include_cuisines:
+                    parent = CUISINE_PARENT_MAP.get(req)
+                    if parent and parent in cuisine_matches:
+                        parent_match = True
+                        break
+                
+                if parent_match:
+                    violation_penalty += 0.1  # Small penalty for parent match (Tier 1.5)
+                    match_tier = 2  # Treat as Tier 2 but low penalty
+                else:
+                    violation_penalty += 0.8  # Huge penalty for complete mismatch (Tier 3)
+                    match_tier = 3
+                    if "missing_required_cuisine" not in violations:
+                        violations.append("missing_required_cuisine")
+
         if "category_relaxed" in str(violations):
             violation_penalty += 0.1  # Additional penalty for category relaxation
         
@@ -169,6 +203,7 @@ def rank_candidates(
             "rating": round(rating_score, 4),
             "ambience": round(ambience_score, 4),
             "website": round(has_website, 4),
+            "penalty": round(violation_penalty, 4),
         }
 
         pros: list[str] = []
@@ -209,14 +244,8 @@ def rank_candidates(
         elif open_status is None and spec.strict_open_check:
             violations.append("opening_hours_unknown")
 
-        if spec.must_include_cuisines and not match_cuisine:
-            violations.append("missing_required_cuisine")
-
-        match_mode = "relaxed" if "missing_required_cuisine" in violations else "strict"
+        match_mode = "relaxed" if match_tier > 1 else "strict"
         
-        # Assign match tier: 1=perfect match, 2=relaxed match
-        match_tier = 2 if "missing_required_cuisine" in violations else 1
-
         candidate = Candidate(
             place=place,
             score=float(round(total_score, 4)),
@@ -228,7 +257,7 @@ def rank_candidates(
             match_budget=bool(spec.budget_per_capita),
             match_distance=dist_km <= radius_km * 1.1,
             match_popularity=False,
-            match_tier=match_tier,  # NEW: set tier
+            match_tier=match_tier,
             primary_tags=cuisine_matches,
             reliability_score=float(round(reliability, 4)),
             distance_km=float(round(dist_km, 3)),
@@ -246,7 +275,7 @@ def rank_candidates(
         else:
             qualified.append(candidate)
 
-    # NEW: Two-tier sorting - tier first (ASC), then score (DESC)
+    # Two-tier sorting - tier first (ASC), then score (DESC)
     qualified.sort(key=lambda c: (c.match_tier, -c.score))
     fallback.sort(key=lambda c: (c.match_tier, -c.score))
 

@@ -91,3 +91,7 @@ pytest
 - `frontend/README.md` and `backend/README.md` include more detailed component/service descriptions.
 - Flutter Web assets under `backend/src/static/app` are optional; remove them if you prefer a React-only deployment.
 - Never commit `.env`, API keys, or `.logs/.pids`. Root `.gitignore` already guards against this.
+
+## Session Memory & New Chats
+- Both `/recommend` and `/recommend-stream` accept an optional `session_id`. When supplied, the backend keeps a short rolling history so the preference parser can see the last few turns.
+- Trigger `POST /session/reset` with `{ "session_id": "<id>" }` (already wired to the frontend “New Chat” button) to clear previous turns and start a fresh conversation.

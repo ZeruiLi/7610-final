@@ -162,6 +162,7 @@ SPICY_TOKENS = {
     "mala",
     "hot & spicy",
     "hunan",
+    "chinese",
 }
 
 SPICY_CATEGORIES = {
@@ -526,7 +527,7 @@ def search_candidates(
                     center_lat,
                     radius_km=effective_radius,
                     categories=categories,
-                    limit=60,  # Increased to ensure enough candidates
+                    limit=cfg.geoapify_max_results,  # Use config value
                     lang=lang,
                 )
             except GeoapifyError:

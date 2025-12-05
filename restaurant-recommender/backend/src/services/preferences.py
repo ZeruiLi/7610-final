@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Optional
+from typing import Any, Optional, Union
 import re
 
 from hello_agents import HelloAgentsLLM, ToolAwareSimpleAgent
+from loguru import logger
 
 from config import Configuration
 from models import PreferenceSpec
 from utils import strip_thinking_tokens
+
+try:
+    from google import genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+    logger.warning("google-genai not installed, Gemini support disabled")
 
 HOTPOT_KEYWORDS = [
     "hot pot",
@@ -73,38 +81,77 @@ ALLOWED_CUISINES = [
 class PreferencesParser:
     def __init__(self, cfg: Configuration) -> None:
         self.cfg = cfg
-        self.llm = self._init_llm(cfg)
+        self.llm, self.llm_type = self._init_llm_with_fallback(cfg)
 
-    def _init_llm(self, cfg: Configuration) -> HelloAgentsLLM:
+    def _init_llm_with_fallback(self, cfg: Configuration) -> tuple[Union[genai.Client, HelloAgentsLLM], str]:
+        """Initialize LLM with Gemini primary and Ollama fallback."""
+        provider = (cfg.llm_provider or "").lower()
+        
+        # Try Gemini first if configured
+        if provider == "google" and GEMINI_AVAILABLE and cfg.llm_api_key:
+            try:
+                import os
+                os.environ["GEMINI_API_KEY"] = cfg.llm_api_key
+                client = genai.Client()
+                # Test the connection
+                model_id = cfg.llm_model_id or "gemini-2.0-flash-exp"
+                logger.info(f"✅ Using Gemini model: {model_id}")
+                return client, "gemini"
+            except Exception as e:
+                logger.warning(f"⚠️  Gemini initialization failed: {e}, falling back to Ollama")
+        
+        # Fallback to Ollama or other providers
+        if cfg.local_llm:
+            logger.info(f"Using Ollama model: {cfg.local_llm}")
+            kwargs: dict[str, Any] = {"temperature": 0.0}
+            kwargs["model"] = cfg.local_llm
+            kwargs["provider"] = "ollama"
+            kwargs["base_url"] = cfg.sanitized_ollama_url()
+            return HelloAgentsLLM(**kwargs), "ollama"
+        
+        # Last resort: use whatever is configured
         kwargs: dict[str, Any] = {"temperature": 0.0}
         if cfg.llm_model_id or cfg.local_llm:
             kwargs["model"] = (cfg.llm_model_id or cfg.local_llm)
         if cfg.llm_provider:
             kwargs["provider"] = cfg.llm_provider
-        # prefer explicit llm_base_url; for ollama, fallback to sanitized /v1
         if cfg.llm_base_url:
             kwargs["base_url"] = cfg.llm_base_url
         elif (cfg.llm_provider or "").lower() == "ollama":
             kwargs["base_url"] = cfg.sanitized_ollama_url()
         if cfg.llm_api_key:
             kwargs["api_key"] = cfg.llm_api_key
-        return HelloAgentsLLM(**kwargs)
+        return HelloAgentsLLM(**kwargs), "other"
 
     def _build_system_prompt(self, draft: dict[str, Any]) -> str:
         return (
-            "You are a strict preference parser for a restaurant recommender.\n"
+            "You are an expert semantic parser for a restaurant recommender. Your job is to translate natural language user intent into structured search parameters.\n"
             "Always return a single JSON object only. Never add commentary.\n"
-            "Fields:\n"
+            "\n"
+            "### CONCEPT MAPPING GUIDE (Use these rules to infer parameters from abstract intent)\n"
+            "1. **Vibe / Feeling**:\n"
+            "   - 'Warm', 'Comfort', 'Cold weather' -> Map to ['Hotpot', 'Japanese', 'Korean', 'Sichuan'] (implies Soup/Ramen/Spicy)\n"
+            "   - 'Healthy', 'Light', 'Diet' -> Map to ['Vegan', 'Seafood', 'Japanese']\n"
+            "   - 'Hangover', 'Greasy' -> Map to ['Pizza', 'Mexican', 'Korean', 'BBQ']\n"
+            "   - 'Spicy', 'Mala' -> Map to ['Sichuan', 'Thai', 'Korean', 'Mexican']\n"
+            "\n"
+            "2. **Occasion**:\n"
+            "   - 'Date night', 'Romantic' -> ambiance: ['Romantic'], cuisines: ['Italian', 'Seafood', 'Japanese']\n"
+            "   - 'Business lunch', 'Meeting' -> ambiance: ['Quiet']\n"
+            "   - 'Party', 'Group', 'Birthday' -> ambiance: ['Casual'], cuisines: ['Hotpot', 'BBQ', 'Pizza']\n"
+            "\n"
+            "3. **Fields**:\n"
             "- city (string), area (string|null), anchor_poi (string|null), anchor_zip (string|null)\n"
             "- distance_km (number), people (int|null), budget_per_capita (number|null)\n"
             "- cuisines (array of strings), must_include_cuisines (array), must_exclude_cuisines (array)\n"
             "- ambiance (array of strings), rating_min (number|null)\n"
-            "- dining_time (string|null, e.g., 'Tue 20:00' or '20:00'), min_duration_min (int), strict_open_check (bool)\n"
+            "- dining_time (string|null, e.g., 'Tue 20:00'), min_duration_min (int), strict_open_check (bool)\n"
             "- lang (string)\n"
-            "Hard constraints: must_include_cuisines, must_exclude_cuisines, dining_time with strict_open_check, distance_km.\n"
-            "Soft preferences: cuisines, ambiance, budget_per_capita, rating_min.\n"
-            f"Allowed cuisine labels: {', '.join(ALLOWED_CUISINES)}. Prefer these labels; do NOT invent new labels. "
-            "If the user only says 'spicy' or 'mala', map it to 'Sichuan' as the cuisine preference.\n"
+            "\n"
+            "### RULES\n"
+            f"Allowed cuisine labels: {', '.join(ALLOWED_CUISINES)}. Prefer these labels.\n"
+            "Hard constraints: must_include_cuisines, must_exclude_cuisines, dining_time with strict_open_check.\n"
+            "Soft preferences: cuisines, ambiance, budget_per_capita.\n"
             "You are given a draft JSON from rule-based parsing; use it as defaults and only fix mistakes or fill missing values.\n"
             f"DRAFT_SPEC:\n{json.dumps(draft, ensure_ascii=False)}\n"
             "Return JSON only."
@@ -112,22 +159,38 @@ class PreferencesParser:
 
     def parse(self, text: str, draft: dict[str, Any], history: list[dict] | None = None) -> PreferenceSpec:
         system_prompt = self._build_system_prompt(draft)
-        agent = ToolAwareSimpleAgent(
-            name="PreferenceParser",
-            llm=self.llm,
-            system_prompt=system_prompt,
-            enable_tool_calling=False,
-        )
-
+        
         prompt_parts: list[str] = []
         if history:
             hist_str = "\n".join([f"{t['role']}: {t['content']}" for t in history])
             prompt_parts.append(f"HISTORY:\n{hist_str}")
         prompt_parts.append(f"CURRENT REQUEST:\n{text}")
-        prompt = "\n\n".join(prompt_parts)
-
-        raw = agent.run(prompt)
-        agent.clear_history()
+        user_prompt = "\n\n".join(prompt_parts)
+        
+        # Use Gemini native client if available
+        if self.llm_type == "gemini":
+            model_id = self.cfg.llm_model_id or "gemini-2.0-flash-exp"
+            try:
+                full_prompt = f"{system_prompt}\n\n{user_prompt}"
+                response = self.llm.models.generate_content(
+                    model=model_id,
+                    contents=full_prompt
+                )
+                raw = response.text
+            except Exception as e:
+                logger.error(f"Gemini parsing failed: {e}")
+                raise ValueError(f"LLM call failed: {e}") from e
+        else:
+            # Use HelloAgentsLLM (Ollama or others)
+            agent = ToolAwareSimpleAgent(
+                name="PreferenceParser",
+                llm=self.llm,
+                system_prompt=system_prompt,
+                enable_tool_calling=False,
+            )
+            raw = agent.run(user_prompt)
+            agent.clear_history()
+        
         cleaned = strip_thinking_tokens(raw).strip()
         start = cleaned.find("{")
         end = cleaned.rfind("}")

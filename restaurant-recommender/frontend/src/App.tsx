@@ -7,17 +7,17 @@ export function App() {
       <header className="app-header">
         <div className="brand">
           <span className="brand-badge">TastyGo</span>
-          <h1 className="brand-title">TastyGo 餐厅推荐助手</h1>
+          <h1 className="brand-title">TastyGo Restaurant Recommender</h1>
         </div>
         <p className="brand-subtitle">
-          自然语言描述需求，结合 Geoapify 与 LLM 实时生成可信赖的推荐。
+          Describe your needs in natural language. We combine Geoapify and LLM to generate trustworthy recommendations in real-time.
         </p>
       </header>
       <main className="app-main">
         <HomePage />
       </main>
       <footer className="app-footer">
-        <span>Geoapify Maps © • 推荐数据仅供参考，请以官方信息为准。</span>
+        <span>Geoapify Maps © • Recommendation data for reference only, please refer to official information.</span>
       </footer>
     </div>
   )
