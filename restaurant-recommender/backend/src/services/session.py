@@ -26,22 +26,39 @@ class SessionManager:
         self._last_access[session_id] = time.time()
         return self._sessions.get(session_id, [])
 
+    def add_user_turn(self, session_id: str, user_query: str) -> None:
+        self._append_turn(session_id, "user", user_query)
+
+    def add_assistant_turn(self, session_id: str, response: str) -> None:
+        self._append_turn(session_id, "assistant", response)
+
     def add_turn(self, session_id: str, user_query: str, system_response: str) -> None:
+        """Append user + assistant messages as a pair for backward compatibility."""
         if not session_id:
             return
-        
+        self._append_turn(session_id, "user", user_query)
+        self._append_turn(session_id, "assistant", system_response)
+
+    def reset(self, session_id: str) -> None:
+        """Clear a session's history."""
+        if not session_id:
+            return
+        self._sessions.pop(session_id, None)
+        self._last_access.pop(session_id, None)
+
+    def _append_turn(self, session_id: str, role: str, content: str) -> None:
+        if not session_id:
+            return
+
         self._cleanup()
-        if session_id not in self._sessions:
-            self._sessions[session_id] = []
-        
         now = time.time()
-        self._sessions[session_id].append({"role": "user", "content": user_query, "timestamp": now})
-        self._sessions[session_id].append({"role": "assistant", "content": system_response, "timestamp": now})
-        
-        # Trim history
-        if len(self._sessions[session_id]) > self.max_history * 2:
-             self._sessions[session_id] = self._sessions[session_id][-(self.max_history * 2):]
-        
+        history = self._sessions.setdefault(session_id, [])
+        history.append({"role": role, "content": content, "timestamp": now})
+
+        max_len = self.max_history * 2
+        if len(history) > max_len:
+            self._sessions[session_id] = history[-max_len:]
+
         self._last_access[session_id] = now
 
     def _cleanup(self) -> None:

@@ -23,6 +23,7 @@ from services.report import build_report
 from services.details import fetch_details
 from services.reasoner import build_reason
 from services.bbox_builder import expand_bbox_from_center
+from services.session_utils import fetch_history, record_turn, reset_session
 
 
 app = FastAPI(title="Restaurant Recommender (MVP)")
@@ -163,6 +164,10 @@ class RecommendResponse(BaseModel):
     bbox: Tuple[float, float, float, float]
 
 
+class ResetSessionRequest(BaseModel):
+    session_id: str = Field(..., description="ID of the session to reset")
+
+
 @app.get("/healthz")
 def healthz() -> dict:
     cfg = Configuration.from_env()
@@ -213,6 +218,15 @@ def health_llm() -> dict:
     return {"ok": ok, "provider": provider or "unset", "detail": detail}
 
 
+@app.post("/session/reset")
+def session_reset(req: ResetSessionRequest) -> dict:
+    sid = (req.session_id or "").strip()
+    if not sid:
+        raise HTTPException(status_code=400, detail="session_id required")
+    reset_session(sid)
+    return {"status": "cleared"}
+
+
 @app.post("/recommend", response_model=RecommendResponse)
 async def recommend(req: RecommendRequest) -> RecommendResponse:
     try:
@@ -223,10 +237,9 @@ async def recommend(req: RecommendRequest) -> RecommendResponse:
 
     try:
         # Session handling
-        from services.session import session_manager
-        history = session_manager.get_history(req.session_id) if req.session_id else None
+        history = fetch_history(req.session_id)
 
-        spec: PreferenceSpec = parse_preferences(cfg, req.query, history=history)
+        spec: PreferenceSpec = parse_preferences(cfg, req.query, history=history or None)
         if req.user_lat is not None and req.user_lon is not None:
             spec.anchor_lat = req.user_lat
             spec.anchor_lon = req.user_lon
@@ -275,8 +288,7 @@ async def recommend(req: RecommendRequest) -> RecommendResponse:
         md = build_report(spec, ranked, bbox)
         
         # Save turn
-        if req.session_id:
-            session_manager.add_turn(req.session_id, req.query, md)
+        record_turn(req.session_id, req.query, md)
 
         avg_trust = sum(c.source_trust_score for c in ranked[:top_k]) / max(top_k, 1) if top_k else 0.0
         distances = [c.distance_miles for c in ranked[:top_k] if c.distance_miles]
@@ -369,11 +381,10 @@ async def recommend_stream(req: RecommendRequest):
     async def event_generator():
         try:
             # Session handling
-            from services.session import session_manager
-            history = session_manager.get_history(req.session_id) if req.session_id else None
+            history = fetch_history(req.session_id)
 
             # Parse preferences
-            spec = await asyncio.to_thread(parse_preferences, cfg, req.query, history=history)
+            spec = await asyncio.to_thread(parse_preferences, cfg, req.query, history=history or None)
             if req.user_lat and req.user_lon:
                 spec.anchor_lat = req.user_lat
                 spec.anchor_lon = req.user_lon
@@ -399,6 +410,7 @@ async def recommend_stream(req: RecommendRequest):
 
             # 2. Search Candidates (POI Search) - Slower (T=2-9s)
             # Pass resolved anchor to skip re-geocoding
+            final_bbox: Tuple[float, float, float, float] | None = None
             places_initial, final_bbox = await asyncio.to_thread(
                 search_candidates, cfg, spec, min_results=8, anchor=anchor
             )
@@ -417,6 +429,7 @@ async def recommend_stream(req: RecommendRequest):
             # Batch 1: Quick initial 8 candidates
             ranked_batch1 = rank_candidates(spec, places_initial, bbox_center=center, max_results=8)
             ranked_batch1 = apply_rerank(cfg, spec, ranked_batch1)
+            final_ranked: List[Candidate] = list(ranked_batch1)
             
             # Helper to create payload from candidate object
             def _create_candidate_payload(c) -> CandidatePayload:
@@ -571,6 +584,7 @@ async def recommend_stream(req: RecommendRequest):
                 
                 # Get candidates from index 8 onwards (skip first batch)
                 remaining_candidates = ranked_all[8:req.limit]
+                final_ranked.extend(remaining_candidates)
                 
                 # STAGE 1 (Batch 2): Send PARTIAL results
                 for idx, c in enumerate(remaining_candidates, start=8):
@@ -618,11 +632,16 @@ async def recommend_stream(req: RecommendRequest):
                     # Small delay for visual effect
                     await asyncio.sleep(0.02)
             
-            # Signal completion
+            # Build markdown summary for memory + Signal completion
+            report_candidates = final_ranked[: req.limit] if req.limit else final_ranked
+            bbox_for_report = final_bbox or initial_bbox
+            report_md = await asyncio.to_thread(build_report, spec, report_candidates, bbox_for_report)
+            record_turn(req.session_id, req.query, report_md)
             yield 'data: {"type":"complete"}\n\n'
             
         except Exception as exc:
             logger.exception("streaming failed: {}", exc)
+            record_turn(req.session_id, req.query, f"Streaming failed: {exc}")
             error_data = {"type": "error", "message": str(exc)}
             yield f"data: {json.dumps(error_data)}\n\n"
     

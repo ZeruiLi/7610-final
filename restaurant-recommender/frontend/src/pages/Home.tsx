@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { recommendStream, ApiError, type StreamedResult } from '../api/recommend'
+import { recommendStream, resetSession, ApiError, type StreamedResult } from '../api/recommend'
 import type { CandidatePayload } from '../types'
 import { SearchBar } from '../components/SearchBar'
 import { ResultCard } from '../components/ResultCard'
@@ -10,6 +10,7 @@ import { RestaurantDetailModal } from '../components/RestaurantDetailModal'
 import { ProgressBar, type LoadingStage } from '../components/ProgressBar'
 
 const DEFAULT_QUERY = 'Dinner in Seattle Capitol Hill for 2, vegetarian-friendly, under $45 per person'
+const generateSessionId = () => `sess-${Date.now()}-${Math.random().toString(36).slice(2)}`
 
 export function HomePage() {
   const [query, setQuery] = useState('')
@@ -19,6 +20,7 @@ export function HomePage() {
   const [loadingStage, setLoadingStage] = useState<LoadingStage>('idle')
   const [error, setError] = useState<ApiError | null>(null)
   const [sessionId, setSessionId] = useState<string>('')
+  const [isResetting, setIsResetting] = useState(false)
   const [latency, setLatency] = useState<number | null>(null)
   const [selectedCandidate, setSelectedCandidate] = useState<CandidatePayload | null>(null)
   const [visibleCount, setVisibleCount] = useState(8)
@@ -31,7 +33,7 @@ export function HomePage() {
 
   // Initialize session ID on mount
   useEffect(() => {
-    setSessionId(`sess-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+    setSessionId(generateSessionId())
   }, [])
 
   const handleSubmit = useCallback(
@@ -110,7 +112,9 @@ export function HomePage() {
     [sessionId, userLocation],
   )
 
-  const handleClear = useCallback(() => {
+  const handleNewChat = useCallback(() => {
+    if (isResetting) return
+
     controllerRef.current?.abort()
     controllerRef.current = null
     setQuery('')
@@ -120,9 +124,31 @@ export function HomePage() {
     setLoadingStage('idle')
     setError(null)
     setLastQuery('')
-    // Reset session on clear to start fresh context
-    setSessionId(`sess-${Date.now()}-${Math.random().toString(36).slice(2)}`)
-  }, [])
+    setVisibleCount(8)
+    setSelectedCandidate(null)
+    setLatency(null)
+
+    void (async () => {
+      setIsResetting(true)
+      let resetErr: ApiError | null = null
+      try {
+        if (sessionId) {
+          await resetSession(sessionId)
+        }
+      } catch (err) {
+        console.error('reset session failed', err)
+        if (err instanceof ApiError) {
+          resetErr = err
+        } else {
+          resetErr = new ApiError('新对话初始化失败，请稍后重试。', { kind: 'network', cause: err })
+        }
+      } finally {
+        setSessionId(generateSessionId())
+        setError(resetErr)
+        setIsResetting(false)
+      }
+    })()
+  }, [isResetting, sessionId])
 
   const handleUseLocation = useCallback(() => {
     if (!navigator.geolocation) {
@@ -240,8 +266,8 @@ export function HomePage() {
           value={query}
           onChange={setQuery}
           onSubmit={handleSubmit}
-          onClear={handleClear}
-          pending={isPending}
+          onClear={handleNewChat}
+          pending={isPending || isResetting}
           placeholder={streamedResults.length > 0 ? "Refine your search (e.g. 'cheaper', 'in Bellevue')..." : DEFAULT_QUERY}
         />
       </div>

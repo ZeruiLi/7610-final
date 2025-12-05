@@ -47,9 +47,9 @@ export function SearchBar({ value, onChange, onSubmit, onClear, placeholder, pen
           type="button"
           className="btn"
           onClick={() => onClear?.()}
-          disabled={pending || value.length === 0}
+          disabled={pending}
         >
-          Clear
+          New Chat
         </button>
       </div>
     </form>

@@ -234,3 +234,26 @@ export async function* recommendStream(
   }
 }
 
+export async function resetSession(sessionId: string): Promise<void> {
+  if (!sessionId) return
+
+  let response: Response
+  try {
+    response = await fetch(`${baseUrl}/session/reset`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId }),
+    })
+  } catch (error) {
+    throw new ApiError('无法连接后端以重置会话。', { kind: 'network', cause: error })
+  }
+
+  if (!response.ok) {
+    const snippet = (await response.text()).slice(0, 200)
+    throw new ApiError(`重置会话失败（${response.status}）`, {
+      kind: 'http',
+      status: response.status,
+      bodySnippet: snippet,
+    })
+  }
+}

@@ -132,15 +132,14 @@ def fetch_details(place: Place, lang: str = "en") -> DetailContext:
     query = f"{place.name} {loc_context} restaurant reviews menu"
     
     try:
-        payload = _SEARCH.run(
-            {
-                "input": query,
-                "backend": "advanced",
-                "mode": "structured",
-                "max_results": 8,  # Fetch a few more to filter
-                "fetch_full_page": False,
-            }
-        )
+        # Already running in thread via fetch_details_async, so just call directly
+        payload = _SEARCH.run({
+            "input": query,
+            "backend": "advanced",
+            "mode": "structured",
+            "max_results": 5,  # Reduce from 8 to 5 to speed up
+            "fetch_full_page": False,
+        })
     except Exception as exc:
         logger.warning("details search failed for %s: %s", query, exc)
         payload = {"results": []}
